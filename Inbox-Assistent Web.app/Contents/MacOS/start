@@ -1,0 +1,30 @@
+#!/bin/zsh
+APP_RESOURCES="${0:A:h}/../Resources"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/Library/Frameworks/Python.framework/Versions/3.14/bin:${PATH}"
+export PYTHONDONTWRITEBYTECODE=1
+umask 077
+LOG_DIR="${HOME}/Library/Logs/Inbox-Assistent-Web"
+/bin/mkdir -p "$LOG_DIR"
+: >"$LOG_DIR/start.log"
+PYTHON=""
+PYTHON_ARCH=""
+for CANDIDATE in /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3 /usr/bin/python3; do
+  [[ -x "$CANDIDATE" ]] || continue
+  for ARCH in arm64 x86_64; do
+    if /usr/bin/arch "-$ARCH" "$CANDIDATE" -c 'import PIL, pymupdf' >/dev/null 2>>"$LOG_DIR/start.log"; then
+      PYTHON="$CANDIDATE"
+      PYTHON_ARCH="$ARCH"
+      break 2
+    fi
+  done
+done
+if [[ -z "$PYTHON" ]]; then
+  /usr/bin/osascript -e 'display alert "Inbox-Assistent Web benötigt Python" message "Python mit Pillow und PyMuPDF wurde nicht gefunden. Siehe Anleitung-Web-App.md."'
+  exit 1
+fi
+/usr/bin/arch "-$PYTHON_ARCH" "$PYTHON" "$APP_RESOURCES/web_app.py" >/dev/null 2>>"$LOG_DIR/start.log"
+RESULT=$?
+if (( RESULT != 0 )); then
+  /usr/bin/osascript -e 'display alert "Inbox-Assistent Web konnte nicht starten" message "Details stehen in Library/Logs/Inbox-Assistent-Web/start.log."'
+fi
+exit "$RESULT"

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inbox-Assistent</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">▰</span><span>Inbox<span class="brand-light">Assistent</span></span></div>
+      <div class="sidebar-section">ARBEITSABLAUF</div>
+      <div class="step active"><span>1</span><div><strong>Fotos auswählen</strong><small>Ordner und Fotoseiten</small></div></div>
+      <div class="step"><span>2</span><div><strong>Briefe ordnen</strong><small>Gruppieren und prüfen</small></div></div>
+      <div class="step"><span>3</span><div><strong>PDFs exportieren</strong><small>Im gleichen Ordner speichern</small></div></div>
+      <div class="sidebar-note"><strong>Privat bis zur Freigabe</strong><p>Manuelle Bearbeitung und Texterkennung laufen lokal. Nur ausdrücklich für ChatGPT ausgewählte Fotos werden übertragen.</p></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar"><div><span class="eyebrow">LOKALE WEB-APP</span><h1>Briefe aus Fotos erstellen</h1><p>Fotoseiten zuordnen, prüfen und gesammelt als PDFs exportieren.</p></div><div class="top-actions button-row"><button id="choose-folder" class="button secondary" type="button">Ordner auswählen</button><button id="quit" class="button secondary" type="button">App beenden</button></div></header>
+      <div id="notice" class="notice" role="status" hidden></div>
+
+      <section class="folder-panel" aria-label="Aktueller Quellordner"><div class="folder-icon">▣</div><div class="folder-copy"><span class="eyebrow">QUELL- UND ZIELORDNER</span><strong id="folder-label">Bitte zuerst einen Fotoordner auswählen</strong><small>Die Originalfotos bleiben hier. PDFs werden ebenfalls hier gespeichert.</small></div><span id="draft-badge" class="pill muted">Kein Entwurf</span></section>
+
+      <section id="drop-zone" class="drop-zone" aria-label="Fotodateien hineinziehen"><div class="drop-symbol">⇩</div><div><h2>Fotoseiten hier hineinziehen</h2><p>JPG, JPEG, HEIC oder PNG aus dem gewählten Ordner</p></div><button id="browse-files" class="button light" type="button">Fotos auswählen</button><input id="file-input" type="file" accept=".jpg,.jpeg,.heic,.png,image/jpeg,image/png,image/heic" multiple hidden></section>
+
+      <div class="summary-cards"><div class="stat"><span>Importierte Seiten</span><strong id="photo-count">0</strong></div><div class="stat"><span>Offene Seiten</span><strong id="open-count">0</strong></div><div class="stat"><span>Exportbereite Briefe</span><strong id="ready-count">0</strong></div><div class="stat"><span>Erledigte PDFs</span><strong id="done-count">0</strong></div></div>
+
+      <section class="workspace">
+        <div class="section-head"><div><span class="eyebrow">01 / EINGANG</span><h2>Ungruppierte Fotoseiten</h2><p>Hake zusammengehörige Seiten ab. Du kannst sie später in den Gruppen umsortieren.</p></div><div class="button-row"><button id="manual-group" class="button secondary" type="button" disabled>Zusammenführen</button><button id="ai-group" class="button accent" type="button" disabled>Mit ChatGPT analysieren</button></div></div>
+        <div id="ungrouped" class="photo-grid drop-target"><div class="empty">Noch keine Fotoseiten importiert.</div></div>
+      </section>
+
+      <section class="workspace groups-workspace"><div class="section-head"><div><span class="eyebrow">02 / BRIEFE</span><h2>Dokumentgruppen</h2><p>Seiten ziehen, Reihenfolge ändern und Datum, Organisation und Titel prüfen.</p></div></div><div id="groups" class="group-list"><div class="empty">Noch keine Gruppen erstellt.</div></div></section>
+
+      <section class="export-panel"><div><span class="eyebrow">03 / ABSCHLUSS</span><h2>Fertige Briefe exportieren</h2><p>Nur vollständige und bestätigte Gruppen werden exportiert. Alle übrigen Seiten bleiben im Entwurf.</p></div><button id="export" class="button primary" type="button">Exportieren <span aria-hidden="true">→</span></button></section>
+
+      <section id="results" class="results" hidden><div class="section-head"><div><span class="eyebrow">ERGEBNIS</span><h2>Exportübersicht</h2></div></div><div id="result-content"></div></section>
+      <section id="completed" class="completed" hidden><span class="eyebrow">BEREITS EXPORTIERT</span><div id="completed-list"></div></section>
+    </main>
+  </div>
+
+  <dialog id="preview-dialog" class="preview-dialog"><div class="preview-head"><div><span class="eyebrow">FOTOVORSCHAU</span><h2 id="preview-title"></h2></div><button id="close-preview" class="icon-button" type="button" aria-label="Vorschau schließen">×</button></div><div class="preview-image-wrap"><img id="preview-image" alt="Fotoseite"></div><div class="preview-footer"><span>Änderungen wirken nur auf die PDF. Das Originalfoto bleibt unverändert.</span><div class="button-row"><button id="zoom-preview" class="button secondary" type="button">Vergrößern</button><button id="reset-correction" class="button secondary" type="button">Auto-Korrektur zurücksetzen</button><button id="rotate-left" class="button secondary" type="button">↶ 90° links</button><button id="rotate-right" class="button secondary" type="button">↷ 90° rechts</button><button id="rotate-half" class="button secondary" type="button">⟳ 180°</button></div></div></dialog>
+</body>
+</html>

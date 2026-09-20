@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>de</string>
+	<key>CFBundleDisplayName</key>
+	<string>Inbox-Assistent Web</string>
+	<key>CFBundleExecutable</key>
+	<string>start</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.inboxassistent.localweb</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Inbox-Assistent Web</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Der Inbox-Assistent verarbeitet nur Fotos aus einem von dir ausgewählten Ordner.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Der Inbox-Assistent verarbeitet nur Fotos aus einem von dir ausgewählten Ordner.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
