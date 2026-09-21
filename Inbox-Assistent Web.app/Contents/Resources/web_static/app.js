@@ -200,6 +200,30 @@
     else notify(`${imported} ${imported === 1 ? "Foto" : "Fotos"} im Entwurf.`, "success");
   }
 
+  // Geblättert wird im jeweiligen Zusammenhang: innerhalb der Gruppe, zu der die
+  // Seite gehört, sonst innerhalb der ungruppierten Seiten – in Anzeigereihenfolge.
+  function previewList(id) {
+    const group = state.groups.find(item => item.pages.includes(id));
+    const ids = group ? group.pages : state.images.filter(image =>
+      !state.groups.some(other => other.pages.includes(image.id))).map(image => image.id);
+    return ids.filter(entry => !imageById(entry)?.missing);
+  }
+
+  function updatePreviewNav() {
+    const ids = previewList(previewId);
+    const index = ids.indexOf(previewId);
+    $("#preview-prev").disabled = index <= 0;
+    $("#preview-next").disabled = index < 0 || index >= ids.length - 1;
+    $("#preview-position").textContent = index < 0 ? "" : `SEITE ${index + 1} VON ${ids.length}`;
+  }
+
+  function stepPreview(offset) {
+    if (!previewId) return;
+    const ids = previewList(previewId);
+    const next = ids[ids.indexOf(previewId) + offset];
+    if (next) openPreview(next);
+  }
+
   function openPreview(id) {
     const image = imageById(id);
     if (!image || image.missing) return;
@@ -209,7 +233,8 @@
     $(".preview-image-wrap").classList.remove("zoomed");
     $("#zoom-preview").textContent = "Vergrößern";
     $("#reset-correction").disabled = !image.auto_rotation && !image.auto_quad && !image.auto_angle;
-    $("#preview-dialog").showModal();
+    updatePreviewNav();
+    if (!$("#preview-dialog").open) $("#preview-dialog").showModal();
   }
 
   async function rotate(degrees) {
@@ -217,6 +242,7 @@
     const result = await run(() => api("/api/rotate", {id:previewId, degrees}), "Vorschau wird gedreht …");
     if (result) {
       $("#preview-image").src = previewUrl(previewId);
+      updatePreviewNav();
       notify("Drehung für die PDF gespeichert.", "success");
     }
   }
@@ -359,6 +385,13 @@
     });
   }
 
+  $("#preview-prev").addEventListener("click", () => stepPreview(-1));
+  $("#preview-next").addEventListener("click", () => stepPreview(1));
+  $("#preview-dialog").addEventListener("keydown", event => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    stepPreview(event.key === "ArrowLeft" ? -1 : 1);
+  });
   $("#close-preview").addEventListener("click", () => $("#preview-dialog").close());
   $("#preview-dialog").addEventListener("close", () => previewId = null);
   $("#rotate-left").addEventListener("click", () => rotate(90));
