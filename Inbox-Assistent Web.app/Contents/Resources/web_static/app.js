@@ -129,10 +129,25 @@
     try { input.setSelectionRange(saved.start, saved.end); } catch { /* type=date kennt keine Auswahl */ }
   }
 
+  // Welcher Schritt in der Seitenleiste gerade hervorgehoben wird. Nur eine grobe
+  // Orientierung, kein strenger Zustandsautomat – Nutzer können jederzeit zwischen
+  // Schritten hin- und herspringen.
+  function currentStep() {
+    if (!state.folder) return 1;
+    if (!state.images.length) return 2;
+    if (!state.groups.length) return 3;
+    if (!state.groups.some(group => group.ready)) return 4;
+    return 5;
+  }
+
   function render() {
     const focus = captureFocus();
     const grouped = new Set(state.groups.flatMap(group => group.pages));
     const open = state.images.filter(image => !grouped.has(image.id));
+    const step = currentStep();
+    for (const element of document.querySelectorAll(".step")) {
+      element.classList.toggle("active", Number(element.dataset.step) === step);
+    }
     for (const id of [...selected]) if (!open.some(image => image.id === id)) selected.delete(id);
     $("#folder-label").textContent = state.folder || "Bitte zuerst einen Fotoordner auswählen";
     $("#folder-label").title = state.folder || "";
@@ -161,7 +176,7 @@
       return `<article class="group-card" data-group="${esc(group.id)}">
         <div class="group-top"><div><span class="group-index">BRIEF ${String(position + 1).padStart(2,"0")} · ${group.pages.length} ${group.pages.length === 1 ? "SEITE" : "SEITEN"}</span><h3>${group.source === "ai" ? `${esc(providerInfo(group.provider).name)}-Vorschlag` : "Manuelle Gruppe"}</h3></div><div class="group-actions"><span class="status ${group.ready ? "" : "warn"}">${group.ready ? "Bereit zum Export" : "Prüfen"}</span><button class="text-button danger ungroup-button" type="button">Auflösen</button></div></div>
         <div class="group-fields"><div class="field"><label>DATUM</label><input name="date" type="date" value="${esc(group.date)}"></div><div class="field"><label>ORGANISATION</label><input name="sender" value="${esc(group.sender)}" placeholder="Absenderorganisation" maxlength="70"></div><div class="field"><label>TITEL / BETREFF</label><input name="title" value="${esc(group.title)}" placeholder="Betreff des Briefs" maxlength="100"></div></div>
-        <div class="filename-preview">PDF: ${esc(filename)}</div>
+        <div class="filename-preview">PDF: ${esc(filename)}<span class="info" tabindex="0"><span aria-hidden="true">i</span><span class="info-bubble" role="tooltip">Der Dateiname setzt sich automatisch aus Datum, Organisation und Titel zusammen.</span></span></div>
         ${reason ? `<div class="group-warning">${esc(reason)}</div>` : ""}
         ${autoWarnings ? `<div class="group-warning">Bei ${autoWarnings} ${autoWarnings === 1 ? "Seite" : "Seiten"} war eine automatische Begradigung nicht eindeutig. Bitte Vorschau prüfen.</div>` : ""}
         <div class="page-strip drop-target" data-target="${esc(group.id)}">${pages || `<div class="empty">Seiten hierher ziehen</div>`}</div>
