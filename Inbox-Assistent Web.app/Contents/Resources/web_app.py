@@ -184,7 +184,9 @@ def _auto_deskew(image: Image.Image) -> tuple[float, bool]:
     grey = sample.convert("L").filter(ImageFilter.GaussianBlur(0.5))
     # A page needs enough dark marks to infer horizontal text lines.
     dark = grey.point(lambda p: 255 if p < 160 else 0)
-    count = sum(1 for value in dark.getdata() if value)
+    # histogram() statt getdata(): zählt dasselbe, ist schneller und getdata() fällt
+    # in Pillow 14 weg. dark enthält nur 0 und 255.
+    count = dark.histogram()[255]
     if count < grey.width * grey.height * 0.006:
         return 0.0, True
     best_angle, best_score = 0.0, -1.0
