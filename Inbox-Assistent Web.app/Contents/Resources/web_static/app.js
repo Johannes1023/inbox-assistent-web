@@ -11,8 +11,11 @@
 
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[ch]);
   const imageById = (id) => state.images.find(image => image.id === id);
-  const imageUrl = (id) => `/api/thumb/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}&v=${Date.now()}`;
-  const previewUrl = (id) => `/api/image/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}&v=${Date.now()}`;
+  // Die Version ändert sich nur, wenn sich das Bild ändert (Datei, Drehung, Korrektur).
+  // Vorher hing Date.now() an: jedes Neuzeichnen lud alle Vorschauen neu.
+  const version = (id) => encodeURIComponent(imageById(id)?.version || "");
+  const imageUrl = (id) => `/api/thumb/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}&v=${version(id)}`;
+  const previewUrl = (id) => `/api/image/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}&v=${version(id)}`;
 
   async function api(path, data = {}) {
     const response = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json","X-App-Token":token}, body:JSON.stringify(data)});

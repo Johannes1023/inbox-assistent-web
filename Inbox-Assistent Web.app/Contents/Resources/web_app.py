@@ -19,6 +19,7 @@ import tempfile
 import threading
 import uuid
 import webbrowser
+from collections import OrderedDict
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -330,6 +331,39 @@ def _render_image(path: Path, image_state: dict, thumbnail: bool = False) -> Ima
     return image
 
 
+def _image_version(image: dict) -> str:
+    """Kurzer Schlüssel für alles, was das gerenderte Bild beeinflusst."""
+    merkmale = [image.get("sha256", ""), image.get("rotation", 0), image.get("auto_rotation", 0),
+                image.get("auto_angle", 0), image.get("auto_quad")]
+    return hashlib.sha256(json.dumps(merkmale).encode()).hexdigest()[:16]
+
+
+# Gerenderte Vorschauen. Begradigen und Entzerren kosten pro Foto Hunderte
+# Millisekunden; ohne Cache wurde bei jedem Neuzeichnen alles neu gerechnet.
+_RENDER_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_RENDER_CACHE_LIMIT = 64 * 1024 * 1024
+_render_cache_lock = threading.Lock()
+
+
+def _render_jpeg(image_id: str, path: Path, photo: dict, thumbnail: bool) -> bytes:
+    key = (image_id, _image_version(photo), thumbnail)
+    with _render_cache_lock:
+        if key in _RENDER_CACHE:
+            _RENDER_CACHE.move_to_end(key)
+            return _RENDER_CACHE[key]
+    image = _render_image(path, photo, thumbnail=thumbnail)
+    if not thumbnail:
+        image.thumbnail((2200, 3000))
+    stream = BytesIO()
+    image.save(stream, "JPEG", quality=84)
+    data = stream.getvalue()
+    with _render_cache_lock:
+        _RENDER_CACHE[key] = data
+        while sum(len(value) for value in _RENDER_CACHE.values()) > _RENDER_CACHE_LIMIT and len(_RENDER_CACHE) > 1:
+            _RENDER_CACHE.popitem(last=False)
+    return data
+
+
 def _write_pdf(draft: dict, group: dict, target: Path) -> list[str]:
     """Baut die PDF seitenweise und speichert sie direkt nach target.
 
@@ -458,6 +492,7 @@ class App:
         for image in draft["images"].values():
             current = dict(image)
             current["missing"] = not _photo_path(draft, image).is_file()
+            current["version"] = _image_version(image)
             images.append(current)
         groups = []
         for group in draft["groups"]:
@@ -818,11 +853,11 @@ def make_handler(app: App):
             token = self.headers.get("X-App-Token") or parse_qs(parsed.query).get("token", [""])[0]
             return secrets.compare_digest(token, app.token)
 
-        def _reply(self, status: int, content: bytes, content_type: str) -> None:
+        def _reply(self, status: int, content: bytes, content_type: str, cache: str = "no-store") -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
             self.end_headers()
@@ -873,12 +908,12 @@ def make_handler(app: App):
                         photo = draft["images"].get(image_id)
                         if not photo:
                             raise ValueError("Foto nicht gefunden.")
-                        image = _render_image(_photo_path(draft, photo), photo, thumbnail=parsed.path.startswith("/api/thumb/"))
-                        if parsed.path.startswith("/api/image/"):
-                            image.thumbnail((2200, 3000))
-                        stream = BytesIO()
-                        image.save(stream, "JPEG", quality=84)
-                    return self._reply(200, stream.getvalue(), "image/jpeg")
+                        photo = dict(photo)
+                        path = _photo_path(draft, photo)
+                    # Rendern ohne Lock: mehrere Vorschauen entstehen parallel.
+                    data = _render_jpeg(image_id, path, photo, parsed.path.startswith("/api/thumb/"))
+                    # Die URL trägt die Bildversion; ändert sich das Bild, ändert sich die URL.
+                    return self._reply(200, data, "image/jpeg", cache="private, max-age=31536000, immutable")
                 if parsed.path == "/":
                     return self._reply(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
                 return self._json(404, {"error": "Nicht gefunden."})
