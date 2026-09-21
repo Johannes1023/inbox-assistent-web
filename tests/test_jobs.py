@@ -52,7 +52,7 @@ def langsame_ki(monkeypatch):
     import ai
 
     def _setzen(dauer=1.5, fehler=None):
-        def fake_classify(items, existing_senders, feedback=""):
+        def fake_classify(items, existing_senders, feedback="", provider="chatgpt"):
             time.sleep(dauer)
             if fehler:
                 raise RuntimeError(fehler)

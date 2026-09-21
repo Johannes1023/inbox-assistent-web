@@ -32,7 +32,7 @@ from urllib.request import urlopen
 import pymupdf
 from PIL import Image, ImageFilter
 
-from ai import classify
+from ai import PROVIDERS, classify
 from core import (InboxItem, _load_image, fallback_date, hash_file, is_blank_component,
                   sanitize_component, validate_date)
 
@@ -447,6 +447,7 @@ class App:
             self.store = {"version": 2, "drafts": {}}
             self.notice = (f"Der gespeicherte Entwurf war beschädigt und wurde als {backup.name} gesichert. "
                            "Die Fotos im Ordner sind unverändert; bitte erneut importieren.")
+        self.store.setdefault("settings", {})
         self.folder: Path | None = None
         # Ein laufender Vorgang (Analyse oder Export). Der Lock schützt nur kurze
         # Zustandsänderungen; die eigentliche Arbeit läuft ohne ihn, damit die
@@ -507,6 +508,20 @@ class App:
                 raise ValueError("Unbekannter Vorgang.")
             return dict(self.job)
 
+    def provider(self) -> str:
+        """Gewählter KI-Anbieter; ältere Entwürfe ohne Einstellung nutzen ChatGPT wie bisher."""
+        with self.lock:
+            chosen = self.store["settings"].get("ai_provider", "chatgpt")
+            return chosen if chosen in PROVIDERS else "chatgpt"
+
+    def set_provider(self, provider: str) -> dict:
+        if provider not in PROVIDERS:
+            raise ValueError("Unbekannter KI-Anbieter.")
+        with self.lock:
+            self.store["settings"]["ai_provider"] = provider
+            _save_store(self.store)
+            return self.snapshot()
+
     def select_folder(self, folder: Path) -> dict:
         folder = folder.expanduser().resolve()
         if not folder.is_dir():
@@ -530,7 +545,8 @@ class App:
         with self.lock:
             if not self.folder:
                 return {"folder": None, "images": [], "groups": [], "completed": [],
-                        "recent": list(self.store["drafts"])[-5:], "notice": self.notice}
+                        "recent": list(self.store["drafts"])[-5:], "notice": self.notice,
+                        "ai_provider": self.provider()}
             draft = self.draft()
             images = []
             for image in draft["images"].values():
@@ -548,7 +564,7 @@ class App:
                                "filename": f"{_filename_base(group)}.pdf" if ready else ""})
             return {"folder": str(self.folder), "images": images, "groups": groups,
                     "completed": list(draft["completed"]), "recent": list(self.store["drafts"])[-5:],
-                    "notice": self.notice}
+                    "notice": self.notice, "ai_provider": self.provider()}
 
     def _save(self) -> dict:
         _save_store(self.store)
@@ -646,7 +662,7 @@ class App:
             return [InboxItem(i, _photo_path(draft, draft["images"][i]), "Foto",
                               draft["images"][i]["fallback_date"], draft["images"][i]["date_origin"]) for i in ids]
 
-    def ai_group(self, ids: list[str], consent: bool = True, progress=None) -> dict:
+    def ai_group(self, ids: list[str], consent: bool = True, progress=None, provider: str = "chatgpt") -> dict:
         """Klassifiziert ausgewählte Fotos.
 
         OCR, der Codex-Aufruf und die Begradigung laufen bewusst ohne den Lock:
@@ -668,9 +684,9 @@ class App:
 
         schritte = len(items) + 1
         if progress:
-            progress(0, schritte, "ChatGPT wertet die Seiten aus")
+            progress(0, schritte, f"{PROVIDERS.get(provider, provider)} wertet die Seiten aus")
         # The model sees exactly these files. It is never given folder write access.
-        suggestions = classify(items, _known_senders(folder, erledigt))
+        suggestions = classify(items, _known_senders(folder, erledigt), provider=provider)
         prepared = []
         for suggestion in suggestions:
             hinweise = []
@@ -684,7 +700,7 @@ class App:
             pruefen = bool(suggestion.needs_review) or bool(hinweise)
             prepared.append({"id": uuid.uuid4().hex, "pages": suggestion.file_ids,
                 "date": datum, "sender": suggestion.sender, "title": suggestion.title,
-                "source": "ai", "confirmed": False,
+                "source": "ai", "provider": provider, "confirmed": False,
                 "needs_review": pruefen,
                 "reason": " ".join(hinweise) or suggestion.reason or ("KI-Vorschlag bitte bestätigen." if pruefen else ""),
                 "evidence": suggestion.evidence})
@@ -1050,12 +1066,19 @@ def make_handler(app: App):
                     return self._json(200, app.select_folder(folder) if folder else {"cancelled": True})
                 if path == "/api/group":
                     return self._json(200, app.group(data.get("ids", [])))
+                if path == "/api/settings":
+                    return self._json(200, app.set_provider(str(data.get("ai_provider", ""))))
                 if path == "/api/ai":
                     ids = data.get("ids", [])
+                    # Der Anbieter aus der Anfrage ist der, den der Freigabedialog genannt hat.
+                    provider = data.get("provider") or app.provider()
+                    if provider not in PROVIDERS:
+                        raise ValueError("Unbekannter KI-Anbieter.")
                     # Auswahl und Freigabe sofort prüfen, damit Fehleingaben 400 ergeben
                     # statt erst als Jobfehler aufzutauchen.
                     app.ai_prepare(ids, data.get("consent") is True)
-                    return self._json(200, {"job": app.start_job("ai", lambda melden: app.ai_group(ids, True, melden))})
+                    return self._json(200, {"job": app.start_job(
+                        "ai", lambda melden: app.ai_group(ids, True, melden, provider=provider))})
                 if path == "/api/update-group":
                     return self._json(200, app.update_group(data.get("id", ""), data))
                 if path == "/api/move":

@@ -15,7 +15,7 @@
       <div class="step active"><span>1</span><div><strong>Fotos auswählen</strong><small>Ordner und Fotoseiten</small></div></div>
       <div class="step"><span>2</span><div><strong>Briefe ordnen</strong><small>Gruppieren und prüfen</small></div></div>
       <div class="step"><span>3</span><div><strong>PDFs exportieren</strong><small>Im gleichen Ordner speichern</small></div></div>
-      <div class="sidebar-note"><strong>Privat bis zur Freigabe</strong><p>Manuelle Bearbeitung und Texterkennung laufen lokal. Nur ausdrücklich für ChatGPT ausgewählte Fotos werden übertragen.</p></div>
+      <div class="sidebar-note"><strong>Privat bis zur Freigabe</strong><p>Manuelle Bearbeitung und Texterkennung laufen lokal. Nur ausdrücklich zur Analyse freigegebene Fotos werden übertragen – an ChatGPT oder Claude, je nach Auswahl.</p></div>
     </aside>
 
     <main class="main">
@@ -29,7 +29,7 @@
       <div class="summary-cards"><div class="stat"><span>Importierte Seiten</span><strong id="photo-count">0</strong></div><div class="stat"><span>Offene Seiten</span><strong id="open-count">0</strong></div><div class="stat"><span>Exportbereite Briefe</span><strong id="ready-count">0</strong></div><div class="stat"><span>Erledigte PDFs</span><strong id="done-count">0</strong></div></div>
 
       <section class="workspace">
-        <div class="section-head"><div><span class="eyebrow">01 / EINGANG</span><h2>Ungruppierte Fotoseiten</h2><p>Hake zusammengehörige Seiten ab. Du kannst sie später in den Gruppen umsortieren.</p></div><div class="button-row"><button id="manual-group" class="button secondary" type="button" disabled>Zusammenführen</button><button id="ai-group" class="button accent" type="button" disabled>Mit ChatGPT analysieren</button></div></div>
+        <div class="section-head"><div><span class="eyebrow">01 / EINGANG</span><h2>Ungruppierte Fotoseiten</h2><p>Hake zusammengehörige Seiten ab. Du kannst sie später in den Gruppen umsortieren.</p></div><div class="button-row"><button id="manual-group" class="button secondary" type="button" disabled>Zusammenführen</button><label class="provider-select" for="ai-provider">KI<select id="ai-provider" aria-label="KI-Anbieter für die Analyse"><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option></select></label><button id="ai-group" class="button accent" type="button" disabled>Mit ChatGPT analysieren</button></div></div>
         <div id="ungrouped" class="photo-grid drop-target"><div class="empty">Noch keine Fotoseiten importiert.</div></div>
       </section>
 

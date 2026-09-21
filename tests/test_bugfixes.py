@@ -100,7 +100,7 @@ class TestBefund9DatumAusKiVorschlag:
     def _vorschlag(self, monkeypatch, datum):
         import ai
 
-        def fake_classify(items, existing_senders, feedback=""):
+        def fake_classify(items, existing_senders, feedback="", provider="chatgpt"):
             return [ai.Suggestion(file_ids=[items[0].id], date=datum, sender="Stadtwerke",
                                   title="Abrechnung", confidence=0.95, needs_review=False,
                                   reason="", evidence="Briefkopf")]
@@ -136,7 +136,7 @@ class TestBefund8VorhandeneAbsender:
 
         import ai
 
-        def fake_classify(items, existing_senders, feedback=""):
+        def fake_classify(items, existing_senders, feedback="", provider="chatgpt"):
             gesehen["senders"] = existing_senders
             return [ai.Suggestion(file_ids=[items[0].id], date="2024-03-12", sender="Stadtwerke Musterstadt",
                                   title="Abrechnung", confidence=0.95, needs_review=False,
@@ -160,7 +160,7 @@ class TestBefund17AutokorrekturProBild:
         state = importer(make_photo("b.jpg", colour=(200, 180, 160), size=(300, 400)))
         ids = [image["id"] for image in state["images"]]
 
-        def fake_classify(items, existing_senders, feedback=""):
+        def fake_classify(items, existing_senders, feedback="", provider="chatgpt"):
             return [ai.Suggestion(file_ids=[item.id], date="2024-03-12", sender="Stadtwerke",
                                   title=f"Brief {item.id[:4]}", confidence=0.95, needs_review=False,
                                   reason="", evidence="Briefkopf") for item in items]

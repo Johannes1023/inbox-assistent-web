@@ -121,7 +121,7 @@ class TestKiHinweiseNurFuerDatum:
     def test_begruendung_der_ki_bleibt_erhalten(self, app, make_photo, importer, monkeypatch):
         import ai
 
-        def fake_classify(items, existing_senders, feedback=""):
+        def fake_classify(items, existing_senders, feedback="", provider="chatgpt"):
             return [ai.Suggestion(file_ids=[items[0].id], date="2024-03-12", sender="", title="Brief",
                                   confidence=0.4, needs_review=True, reason="Briefkopf unleserlich",
                                   evidence="")]

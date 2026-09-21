@@ -9,6 +9,8 @@
   let noticeTimer = null;
   let noticeShown = false;
   const MAX_IMPORT_SIZE = 120 * 1024 * 1024;
+  const PROVIDERS = {chatgpt: {name: "ChatGPT", company: "OpenAI"}, claude: {name: "Claude", company: "Anthropic"}};
+  const providerInfo = (key) => PROVIDERS[key] || PROVIDERS.chatgpt;
 
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[ch]);
   const imageById = (id) => state.images.find(image => image.id === id);
@@ -142,6 +144,9 @@
     $("#done-count").textContent = state.completed.length;
     $("#manual-group").disabled = !selected.size || busy;
     $("#ai-group").disabled = !selected.size || busy;
+    $("#ai-provider").disabled = busy;
+    if (document.activeElement !== $("#ai-provider")) $("#ai-provider").value = state.ai_provider || "chatgpt";
+    $("#ai-group").textContent = `Mit ${providerInfo($("#ai-provider").value).name} analysieren`;
     $("#export").disabled = busy;
     $("#browse-files").disabled = !state.folder || busy;
     $("#drop-zone").classList.toggle("disabled", !state.folder);
@@ -154,7 +159,7 @@
       const reason = group.blocked_reason || (group.needs_review ? group.reason : "");
       const autoWarnings = group.pages.filter(id => imageById(id)?.auto_review).length;
       return `<article class="group-card" data-group="${esc(group.id)}">
-        <div class="group-top"><div><span class="group-index">BRIEF ${String(position + 1).padStart(2,"0")} · ${group.pages.length} ${group.pages.length === 1 ? "SEITE" : "SEITEN"}</span><h3>${group.source === "ai" ? "ChatGPT-Vorschlag" : "Manuelle Gruppe"}</h3></div><div class="group-actions"><span class="status ${group.ready ? "" : "warn"}">${group.ready ? "Bereit zum Export" : "Prüfen"}</span><button class="text-button danger ungroup-button" type="button">Auflösen</button></div></div>
+        <div class="group-top"><div><span class="group-index">BRIEF ${String(position + 1).padStart(2,"0")} · ${group.pages.length} ${group.pages.length === 1 ? "SEITE" : "SEITEN"}</span><h3>${group.source === "ai" ? `${esc(providerInfo(group.provider).name)}-Vorschlag` : "Manuelle Gruppe"}</h3></div><div class="group-actions"><span class="status ${group.ready ? "" : "warn"}">${group.ready ? "Bereit zum Export" : "Prüfen"}</span><button class="text-button danger ungroup-button" type="button">Auflösen</button></div></div>
         <div class="group-fields"><div class="field"><label>DATUM</label><input name="date" type="date" value="${esc(group.date)}"></div><div class="field"><label>ORGANISATION</label><input name="sender" value="${esc(group.sender)}" placeholder="Absenderorganisation" maxlength="70"></div><div class="field"><label>TITEL / BETREFF</label><input name="title" value="${esc(group.title)}" placeholder="Betreff des Briefs" maxlength="100"></div></div>
         <div class="filename-preview">PDF: ${esc(filename)}</div>
         ${reason ? `<div class="group-warning">${esc(reason)}</div>` : ""}
@@ -256,10 +261,17 @@
     const result = await run(() => api("/api/group", {ids:[...selected]}), "Gruppe wird erstellt …");
     if (result) {selected.clear(); render(); notify("Gruppe erstellt. Bitte Datum, Organisation und Titel prüfen.", "success");}
   });
+  $("#ai-provider").addEventListener("change", async event => {
+    const result = await run(() => api("/api/settings", {ai_provider: event.target.value}), "Auswahl wird gespeichert …");
+    if (result) notify(`${providerInfo(result.ai_provider).name} wird für die Analyse verwendet.`, "success");
+  });
   $("#ai-group").addEventListener("click", async () => {
-    if (!confirm(`Diese ${selected.size} ausgewählten Fotos, ihre Dateinamen und lokal erkannter Text werden zur Analyse an OpenAI übertragen. Nur fortfahren, wenn sie nicht sensibel sind. Fortfahren?`)) return;
-    const result = await runJob("/api/ai", {ids:[...selected], consent:true}, "ChatGPT analysiert die ausgewählten Fotos. Das kann etwas dauern …");
-    if (result) {selected.clear(); render(); notify("ChatGPT-Vorschläge sind da. Bitte jede Gruppe prüfen und bestätigen.", "success", true);}
+    // Genau der hier genannte Anbieter wird an den Server übergeben.
+    const provider = $("#ai-provider").value;
+    const {name, company} = providerInfo(provider);
+    if (!confirm(`Diese ${selected.size} ausgewählten Fotos, ihre Dateinamen und lokal erkannter Text werden zur Analyse an ${company} (${name}) übertragen. Nur fortfahren, wenn sie nicht sensibel sind. Fortfahren?`)) return;
+    const result = await runJob("/api/ai", {ids:[...selected], consent:true, provider}, `${name} analysiert die ausgewählten Fotos. Das kann etwas dauern …`);
+    if (result) {selected.clear(); render(); notify(`${name}-Vorschläge sind da. Bitte jede Gruppe prüfen und bestätigen.`, "success", true);}
   });
   $("#export").addEventListener("click", async () => {
     if (!state.folder) return notify("Bitte zuerst einen Quellordner auswählen.", "error");
