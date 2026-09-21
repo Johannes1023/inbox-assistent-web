@@ -108,4 +108,4 @@ Full local dev setup: [`docs/TECHNICAL.md#running-locally`](docs/TECHNICAL.md#ru
 
 ## License / usage note
 
-Portfolio project. The app processes real personal mail for its author; this repository is published to demonstrate engineering practice, not as a maintained open-source product. No warranty — read the code before trusting it with your own documents.
+MIT — free to use, copy, modify. This is a portfolio project first (the app processes real personal mail for its author, and this repo is published to demonstrate engineering practice), but the license places no restriction on reuse. No warranty — read the code before trusting it with your own documents.
