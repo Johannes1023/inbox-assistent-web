@@ -8,7 +8,7 @@ A local-first macOS app that turns a phone-camera pile of photographed letters i
 
 ## The problem
 
-Physical mail doesn't stop existing because you photograph it. A phone full of `IMG_4101.jpg`, `IMG_4102.jpg`, `IMG_4103.jpg` — some of them pages of the *same* letter, in no particular order, with no date, sender, or subject attached — is not an archive. It's a backlog.
+In Germany, official correspondence — tax notices, utility bills, insurance, authorities — is still routinely sent as physical paper mail rather than email, even in 2026. Photographing it on the go (train, mailbox, waiting room) is the practical way to not lose it, but physical mail doesn't stop existing because you photograph it. A phone full of `IMG_4101.jpg`, `IMG_4102.jpg`, `IMG_4103.jpg` — some of them pages of the *same* letter, in no particular order, with no date, sender, or subject attached — is not an archive. It's a backlog.
 
 Sorting it by hand means: figuring out which photos belong together, fixing the crooked angle and orientation from a hasty phone snapshot, and typing out a consistent filename (`date_sender_subject.pdf`) for every single letter, twice a week, forever.
 
