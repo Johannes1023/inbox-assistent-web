@@ -7,6 +7,7 @@
   let previewId = null;
   let busy = false;
   let noticeTimer = null;
+  let noticeShown = false;
 
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[ch]);
   const imageById = (id) => state.images.find(image => image.id === id);
@@ -26,6 +27,7 @@
     if (!response.ok) throw new Error(result.error || "Entwurf konnte nicht geladen werden.");
     state = result;
     render();
+    if (state.notice && !noticeShown) { noticeShown = true; notify(state.notice, "error", true); }
   }
 
   function notify(message, kind = "info", sticky = false) {
@@ -38,7 +40,7 @@
   }
 
   async function run(action, message = "Bitte warten …") {
-    if (busy) return;
+    if (busy) { notify("Es läuft noch ein Vorgang. Bitte kurz warten.", "info"); return null; }
     busy = true;
     document.body.classList.add("busy");
     notify(message, "info", true);
@@ -55,6 +57,38 @@
       busy = false;
       document.body.classList.remove("busy");
       render();
+    }
+  }
+
+  const pause = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  // Startet einen Hintergrundvorgang und fragt seinen Fortschritt ab, bis er fertig ist.
+  // Die Oberfläche bleibt währenddessen erreichbar; Änderungen sperrt der Server.
+  async function runJob(path, data, message) {
+    if (busy) { notify("Es läuft noch ein Vorgang. Bitte kurz warten.", "info"); return null; }
+    busy = true;
+    document.body.classList.add("busy");
+    render();
+    notify(message, "info", true);
+    try {
+      const {job} = await api(path, data);
+      for (;;) {
+        await pause(500);
+        const response = await fetch(`/api/job?id=${encodeURIComponent(job)}`, {headers:{"X-App-Token":token}});
+        const status = await response.json();
+        if (!response.ok) throw new Error(status.error || "Vorgang nicht gefunden.");
+        if (status.status === "error") throw new Error(status.error || "Vorgang fehlgeschlagen.");
+        if (status.status === "done") return status.result;
+        const {done, total, label} = status.progress;
+        if (total) notify(`${label || message} (${done}/${total})`, "info", true);
+      }
+    } catch (error) {
+      notify(error.message || String(error), "error", true);
+      return null;
+    } finally {
+      busy = false;
+      document.body.classList.remove("busy");
+      await refresh().catch(() => render());
     }
   }
 
@@ -85,6 +119,7 @@
     $("#done-count").textContent = state.completed.length;
     $("#manual-group").disabled = !selected.size || busy;
     $("#ai-group").disabled = !selected.size || busy;
+    $("#export").disabled = busy;
     $("#browse-files").disabled = !state.folder || busy;
     $("#drop-zone").classList.toggle("disabled", !state.folder);
     $("#ungrouped").innerHTML = open.length ? open.map(image => photoCard(image, null, true)).join("") : `<div class="empty">${state.images.length ? "Alle importierten Seiten sind einer Gruppe zugeordnet." : "Noch keine Fotoseiten importiert."}</div>`;
@@ -113,6 +148,7 @@
   async function importFiles(files) {
     if (!state.folder) return notify("Bitte zuerst den Quellordner auswählen.", "error");
     if (!files.length) return;
+    if (busy) return notify("Es läuft noch ein Vorgang. Bitte kurz warten.", "info");
     let imported = 0;
     const errors = [];
     busy = true;
@@ -188,12 +224,12 @@
   });
   $("#ai-group").addEventListener("click", async () => {
     if (!confirm(`Diese ${selected.size} ausgewählten Fotos, ihre Dateinamen und lokal erkannter Text werden zur Analyse an OpenAI übertragen. Nur fortfahren, wenn sie nicht sensibel sind. Fortfahren?`)) return;
-    const result = await run(() => api("/api/ai", {ids:[...selected], consent:true}), "ChatGPT analysiert die ausgewählten Fotos. Das kann etwas dauern …");
+    const result = await runJob("/api/ai", {ids:[...selected], consent:true}, "ChatGPT analysiert die ausgewählten Fotos. Das kann etwas dauern …");
     if (result) {selected.clear(); render(); notify("ChatGPT-Vorschläge sind da. Bitte jede Gruppe prüfen und bestätigen.", "success", true);}
   });
   $("#export").addEventListener("click", async () => {
     if (!state.folder) return notify("Bitte zuerst einen Quellordner auswählen.", "error");
-    const result = await run(() => api("/api/export"), "PDFs werden lokal erstellt und per Texterkennung durchsuchbar gemacht …");
+    const result = await runJob("/api/export", {}, "PDFs werden lokal erstellt und per Texterkennung durchsuchbar gemacht …");
     if (result) {renderResults(result); notify(result.exported.length ? `${result.exported.length} ${result.exported.length === 1 ? "PDF wurde" : "PDFs wurden"} exportiert.` : "Keine Gruppe war exportbereit. Siehe Ergebnisübersicht.", result.exported.length ? "success" : "info", true);}
   });
 
@@ -228,8 +264,8 @@
       const oldIndex = current.pages.indexOf(photo.dataset.photo);
       const newIndex = oldIndex + (event.target.matches(".move-left") ? -1 : 1);
       if (newIndex < 0 || newIndex >= current.pages.length) return;
-      const indexAfterRemoval = newIndex > oldIndex ? newIndex : newIndex;
-      await run(() => api("/api/move", {image_id:photo.dataset.photo, target_id:current.id, index:indexAfterRemoval}), "Reihenfolge wird gespeichert …");
+      // Der Server entfernt die Seite vor dem Einfügen; newIndex passt damit in beide Richtungen.
+      await run(() => api("/api/move", {image_id:photo.dataset.photo, target_id:current.id, index:newIndex}), "Reihenfolge wird gespeichert …");
     }
     if (event.target.matches(".reveal")) {
       await run(() => api("/api/reveal", {id:event.target.dataset.id}), "PDF wird im Finder angezeigt …");

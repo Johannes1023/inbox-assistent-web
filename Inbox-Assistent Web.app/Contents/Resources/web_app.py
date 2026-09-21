@@ -63,6 +63,14 @@ def _load_store() -> dict:
     return data
 
 
+def _quarantine_store() -> Path:
+    """Verschiebt eine unlesbare Entwurfsdatei beiseite, ohne sie zu löschen."""
+    source = _store_file()
+    backup = source.with_name(f"drafts.defekt-{datetime.now():%Y%m%d-%H%M%S}.json")
+    os.replace(source, backup)
+    return backup
+
+
 def _save_store(data: dict) -> None:
     target = _store_file()
     fd, name = tempfile.mkstemp(prefix=".draft-", dir=target.parent)
@@ -278,6 +286,32 @@ def _check_space(paths: list[Path], folder: Path) -> None:
         raise OSError("Zu wenig freier Speicherplatz für eine sichere Verarbeitung.")
 
 
+def _publish_new(temp: Path, target: Path) -> None:
+    """Legt target mit dem Inhalt von temp an und überschreibt dabei niemals etwas.
+
+    Bevorzugt ein Hardlink (atomar, schlägt bei vorhandenem Ziel fehl). exFAT/FAT
+    auf USB-Sticks und SD-Karten kennen keine Hardlinks; dort wird exklusiv
+    angelegt (O_EXCL) und kopiert.
+    """
+    try:
+        os.link(temp, target)
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass
+    with open(target, "xb") as out:
+        try:
+            with open(temp, "rb") as source:
+                shutil.copyfileobj(source, out, 1024 * 1024)
+            out.flush()
+            os.fsync(out.fileno())
+        except BaseException:
+            out.close()
+            target.unlink(missing_ok=True)
+            raise
+
+
 def _render_image(path: Path, image_state: dict, thumbnail: bool = False) -> Image.Image:
     image = _load_image(path)
     auto_turn = int(image_state.get("auto_rotation", 0)) % 360
@@ -342,16 +376,68 @@ class App:
     def __init__(self, initial_folder: Path | None = None):
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
-        self.store = _load_store()
+        self.notice = ""
+        try:
+            self.store = _load_store()
+        except ValueError:
+            # Ein beschädigter Entwurf darf den Start nicht verhindern. Die Datei
+            # bleibt als Sicherung erhalten; die Fotos im Ordner sind unberührt.
+            backup = _quarantine_store()
+            self.store = {"version": 2, "drafts": {}}
+            self.notice = (f"Der gespeicherte Entwurf war beschädigt und wurde als {backup.name} gesichert. "
+                           "Die Fotos im Ordner sind unverändert; bitte erneut importieren.")
         self.folder: Path | None = None
+        # Ein laufender Vorgang (Analyse oder Export). Der Lock schützt nur kurze
+        # Zustandsänderungen; die eigentliche Arbeit läuft ohne ihn, damit die
+        # Oberfläche währenddessen bedienbar bleibt.
+        self.job: dict | None = None
         if initial_folder:
             self.select_folder(initial_folder)
+
+    def _ensure_idle(self) -> None:
+        if self.job and self.job["status"] == "running":
+            raise ValueError("Es läuft bereits ein Vorgang. Bitte abwarten.")
+
+    def start_job(self, kind: str, work) -> str:
+        """Startet einen langen Vorgang im Hintergrund und liefert seine Nummer."""
+        with self.lock:
+            self._ensure_idle()
+            job_id = uuid.uuid4().hex
+            self.job = {"id": job_id, "kind": kind, "status": "running",
+                        "progress": {"done": 0, "total": 0, "label": ""},
+                        "result": None, "error": ""}
+
+        def melden(done: int, total: int, label: str = "") -> None:
+            with self.lock:
+                if self.job and self.job["id"] == job_id:
+                    self.job["progress"] = {"done": done, "total": total, "label": label}
+
+        def lauf() -> None:
+            try:
+                ergebnis = work(melden)
+                with self.lock:
+                    if self.job and self.job["id"] == job_id:
+                        self.job.update(status="done", result=ergebnis)
+            except Exception as exc:
+                with self.lock:
+                    if self.job and self.job["id"] == job_id:
+                        self.job.update(status="error", error=str(exc) or exc.__class__.__name__)
+
+        threading.Thread(target=lauf, daemon=True, name=f"inbox-{kind}").start()
+        return job_id
+
+    def job_status(self, job_id: str) -> dict:
+        with self.lock:
+            if not self.job or self.job["id"] != job_id:
+                raise ValueError("Unbekannter Vorgang.")
+            return dict(self.job)
 
     def select_folder(self, folder: Path) -> dict:
         folder = folder.expanduser().resolve()
         if not folder.is_dir():
             raise ValueError("Ordner nicht gefunden.")
         with self.lock:
+            self._ensure_idle()
             key = str(folder)
             self.store["drafts"].setdefault(key, _new_draft(folder))
             self.folder = folder
@@ -365,7 +451,8 @@ class App:
 
     def snapshot(self) -> dict:
         if not self.folder:
-            return {"folder": None, "images": [], "groups": [], "completed": [], "recent": list(self.store["drafts"])[-5:]}
+            return {"folder": None, "images": [], "groups": [], "completed": [],
+                    "recent": list(self.store["drafts"])[-5:], "notice": self.notice}
         draft = self.draft()
         images = []
         for image in draft["images"].values():
@@ -377,7 +464,8 @@ class App:
             ready, reason = _readiness(group, draft)
             groups.append({**group, "ready": ready, "blocked_reason": reason, "filename": f"{_filename_base(group)}.pdf" if ready else ""})
         return {"folder": str(self.folder), "images": images, "groups": groups,
-                "completed": draft["completed"], "recent": list(self.store["drafts"])[-5:]}
+                "completed": draft["completed"], "recent": list(self.store["drafts"])[-5:],
+                "notice": self.notice}
 
     def _save(self) -> dict:
         _save_store(self.store)
@@ -391,6 +479,7 @@ class App:
         if size <= 0 or size > MAX_IMPORT_SIZE:
             raise ValueError("Das Foto ist leer oder zu groß (maximal 120 MB).")
         with self.lock:
+            self._ensure_idle()
             draft = self.draft()
             path = self.folder / filename
             if not path.is_file() or path.stat().st_size != size:
@@ -439,6 +528,7 @@ class App:
 
     def group(self, ids: list[str]) -> dict:
         with self.lock:
+            self._ensure_idle()
             draft = self.draft()
             ids = list(dict.fromkeys(ids))
             if not ids or any(i not in draft["images"] for i in ids):
@@ -450,59 +540,90 @@ class App:
                 "source": "manual", "confirmed": True, "needs_review": False, "reason": ""})
             return self._save()
 
-    def ai_group(self, ids: list[str], consent: bool) -> dict:
+    def ai_prepare(self, ids: list[str], consent: bool, check_idle: bool = True) -> list[InboxItem]:
+        """Prüft die Auswahl sofort, damit Fehleingaben nicht erst im Hintergrundjob auffallen."""
         if not consent:
             raise ValueError("Für die ChatGPT-Analyse ist eine ausdrückliche Freigabe nötig.")
         with self.lock:
+            if check_idle:
+                self._ensure_idle()
             draft = self.draft()
             ids = list(dict.fromkeys(ids))
             if not ids or any(i not in draft["images"] for i in ids) or any(i in _all_grouped(draft) for i in ids):
                 raise ValueError("Bitte ungruppierte Fotos aus diesem Ordner auswählen.")
-            items = [InboxItem(i, _photo_path(draft, draft["images"][i]), "Foto",
-                               draft["images"][i]["fallback_date"], draft["images"][i]["date_origin"]) for i in ids]
-            for item in items:
-                if not item.path.is_file() or hash_file(item.path) != draft["images"][item.id]["sha256"]:
-                    raise ValueError(f"{item.path.name} wurde verändert. Bitte neu importieren.")
-            # The model sees exactly these files. It is never given folder write access.
-            suggestions = classify(items, _known_senders(self.folder))
-            prepared = []
-            for suggestion in suggestions:
-                hinweise = []
-                try:
-                    datum = validate_date(suggestion.date)
-                except ValueError:
-                    # Ein unlesbares Datum darf nicht stumm in den Entwurf: <input type="date">
-                    # zeigt es leer an, und der Nutzer sieht erst beim Export eine Formatmeldung.
-                    datum = draft["images"][suggestion.file_ids[0]]["fallback_date"]
-                    hinweise.append(f"Datum „{suggestion.date}“ war unlesbar; Aufnahmedatum eingesetzt.")
-                if sanitize_component(suggestion.sender.strip(), 70) == PLACEHOLDER:
-                    hinweise.append("Absender fehlt.")
-                if sanitize_component(suggestion.title.strip(), 100) == PLACEHOLDER:
-                    hinweise.append("Titel fehlt.")
-                pruefen = bool(suggestion.needs_review) or bool(hinweise)
-                prepared.append({"id": uuid.uuid4().hex, "pages": suggestion.file_ids,
-                    "date": datum, "sender": suggestion.sender, "title": suggestion.title,
-                    "source": "ai", "confirmed": False,
-                    "needs_review": pruefen,
-                    "reason": " ".join(hinweise) or suggestion.reason or ("KI-Vorschlag bitte bestätigen." if pruefen else ""),
-                    "evidence": suggestion.evidence})
-            corrections = {}
-            for item in items:
-                try:
-                    photo = _load_image(item.path)
-                    turn, unsure_turn = _auto_orientation(photo)
-                    if turn:
-                        photo = photo.rotate(turn, expand=True)
-                    quad = _page_quad(photo)
-                    if quad:
-                        photo = _apply_quad(photo, quad)
-                    angle, unsure_angle = _auto_deskew(photo)
-                    corrections[item.id] = (turn, quad, angle, unsure_turn or unsure_angle)
-                except Exception:
-                    # Eine misslungene Begradigung darf nicht das ganze Analyseergebnis
-                    # kosten. Die Seite bleibt unkorrigiert und wird zur Prüfung markiert.
-                    corrections[item.id] = (0, None, 0.0, True)
+            return [InboxItem(i, _photo_path(draft, draft["images"][i]), "Foto",
+                              draft["images"][i]["fallback_date"], draft["images"][i]["date_origin"]) for i in ids]
+
+    def ai_group(self, ids: list[str], consent: bool = True, progress=None) -> dict:
+        """Klassifiziert ausgewählte Fotos.
+
+        OCR, der Codex-Aufruf und die Begradigung laufen bewusst ohne den Lock:
+        sie dauern Minuten, und die Oberfläche muss in dieser Zeit antworten.
+        Änderungen sind währenddessen über _ensure_idle gesperrt.
+        """
+        # Läuft selbst als Job; die Leerlaufprüfung würde sonst den eigenen Job abweisen.
+        items = self.ai_prepare(ids, consent, check_idle=False)
+        with self.lock:
+            draft = self.draft()
+            folder = self.folder
+            erwartet = {item.id: draft["images"][item.id]["sha256"] for item in items}
+            rueckfall = {item.id: draft["images"][item.id]["fallback_date"] for item in items}
+
+        for item in items:
+            if not item.path.is_file() or hash_file(item.path) != erwartet[item.id]:
+                raise ValueError(f"{item.path.name} wurde verändert. Bitte neu importieren.")
+
+        schritte = len(items) + 1
+        if progress:
+            progress(0, schritte, "ChatGPT wertet die Seiten aus")
+        # The model sees exactly these files. It is never given folder write access.
+        suggestions = classify(items, _known_senders(folder))
+        prepared = []
+        for suggestion in suggestions:
+            hinweise = []
+            try:
+                datum = validate_date(suggestion.date)
+            except ValueError:
+                # Ein unlesbares Datum darf nicht stumm in den Entwurf: <input type="date">
+                # zeigt es leer an, und der Nutzer sieht erst beim Export eine Formatmeldung.
+                datum = rueckfall[suggestion.file_ids[0]]
+                hinweise.append(f"Datum „{suggestion.date}“ war unlesbar; Aufnahmedatum eingesetzt.")
+            if sanitize_component(suggestion.sender.strip(), 70) == PLACEHOLDER:
+                hinweise.append("Absender fehlt.")
+            if sanitize_component(suggestion.title.strip(), 100) == PLACEHOLDER:
+                hinweise.append("Titel fehlt.")
+            pruefen = bool(suggestion.needs_review) or bool(hinweise)
+            prepared.append({"id": uuid.uuid4().hex, "pages": suggestion.file_ids,
+                "date": datum, "sender": suggestion.sender, "title": suggestion.title,
+                "source": "ai", "confirmed": False,
+                "needs_review": pruefen,
+                "reason": " ".join(hinweise) or suggestion.reason or ("KI-Vorschlag bitte bestätigen." if pruefen else ""),
+                "evidence": suggestion.evidence})
+
+        corrections = {}
+        for nummer, item in enumerate(items, start=1):
+            if progress:
+                progress(nummer, schritte, f"Seite {nummer} von {len(items)} wird begradigt")
+            try:
+                photo = _load_image(item.path)
+                turn, unsure_turn = _auto_orientation(photo)
+                if turn:
+                    photo = photo.rotate(turn, expand=True)
+                quad = _page_quad(photo)
+                if quad:
+                    photo = _apply_quad(photo, quad)
+                angle, unsure_angle = _auto_deskew(photo)
+                corrections[item.id] = (turn, quad, angle, unsure_turn or unsure_angle)
+            except Exception:
+                # Eine misslungene Begradigung darf nicht das ganze Analyseergebnis
+                # kosten. Die Seite bleibt unkorrigiert und wird zur Prüfung markiert.
+                corrections[item.id] = (0, None, 0.0, True)
+
+        with self.lock:
+            draft = self.draft()
             for image_id, (turn, quad, angle, uncertain) in corrections.items():
+                if image_id not in draft["images"]:
+                    continue
                 draft["images"][image_id]["auto_rotation"] = turn
                 draft["images"][image_id]["auto_quad"] = quad
                 draft["images"][image_id]["auto_angle"] = angle
@@ -512,6 +633,7 @@ class App:
 
     def update_group(self, group_id: str, fields: dict) -> dict:
         with self.lock:
+            self._ensure_idle()
             group = next((g for g in self.draft()["groups"] if g["id"] == group_id), None)
             if not group:
                 raise ValueError("Gruppe nicht gefunden.")
@@ -529,6 +651,7 @@ class App:
 
     def move(self, image_id: str, target_id: str | None, index: int | None) -> dict:
         with self.lock:
+            self._ensure_idle()
             draft = self.draft()
             if image_id not in draft["images"]:
                 raise ValueError("Seite nicht gefunden.")
@@ -554,6 +677,7 @@ class App:
 
     def ungroup(self, group_id: str) -> dict:
         with self.lock:
+            self._ensure_idle()
             draft = self.draft()
             previous = len(draft["groups"])
             draft["groups"] = [g for g in draft["groups"] if g["id"] != group_id]
@@ -563,6 +687,7 @@ class App:
 
     def rotate(self, image_id: str, degrees: int) -> dict:
         with self.lock:
+            self._ensure_idle()
             draft = self.draft()
             if image_id not in draft["images"] or degrees not in (-90, 90, 180):
                 raise ValueError("Ungültige Drehung.")
@@ -572,6 +697,7 @@ class App:
 
     def reset_correction(self, image_id: str) -> dict:
         with self.lock:
+            self._ensure_idle()
             image = self.draft()["images"].get(image_id)
             if not image:
                 raise ValueError("Seite nicht gefunden.")
@@ -581,63 +707,77 @@ class App:
             image["auto_review"] = False
             return self._save()
 
-    def export(self) -> dict:
+    def export(self, progress=None) -> dict:
+        """Erzeugt die PDFs und benennt die Fotos um.
+
+        PDF-Bau und Texterkennung dauern pro Seite Sekunden und laufen deshalb
+        ohne den Lock. Nur das Fortschreiben des Entwurfs ist gesperrt, damit
+        /api/state währenddessen keinen halb geänderten Zustand sieht.
+        """
         with self.lock:
             draft = self.draft()
             folder = Path(draft["folder"])
-            exported, skipped = [], []
-            for group in list(draft["groups"]):
-                ready, reason = _readiness(group, draft)
-                if not ready:
-                    skipped.append({"group": group.get("title") or "Unbenannte Gruppe", "reason": reason})
-                    continue
+            gruppen = list(draft["groups"])
+        exported, skipped = [], []
+        for nummer, group in enumerate(gruppen):
+            name = group.get("title") or "Unbenannte Gruppe"
+            if progress:
+                progress(nummer, len(gruppen), f"{name} wird exportiert")
+            ready, reason = _readiness(group, draft)
+            if not ready:
+                skipped.append({"group": name, "reason": reason})
+                continue
+            try:
+                base = _filename_base(group)
+                pdf_target = folder / f"{base}.pdf"
+                renames = []
+                for seite, image_id in enumerate(group["pages"], 1):
+                    image = draft["images"][image_id]
+                    src = _photo_path(draft, image)
+                    if hash_file(src) != image["sha256"]:
+                        raise ValueError(f"{src.name} wurde verändert. Bitte neu importieren.")
+                    dst = folder / f"{base}_Seite-{seite:02d}{src.suffix.lower()}"
+                    if dst != src and dst.exists():
+                        raise FileExistsError(f"Fotodatei existiert bereits: {dst.name}")
+                    renames.append((src, dst))
+                if pdf_target.exists():
+                    raise FileExistsError(f"PDF existiert bereits: {pdf_target.name}")
+                if len({str(dst).casefold() for _, dst in renames}) != len(renames):
+                    raise ValueError("Zwei Seiten würden denselben Dateinamen erhalten.")
+                _check_space([src for src, _ in renames], folder)
+                fd, tmp_name = tempfile.mkstemp(prefix=".inbox-export-", suffix=".pdf", dir=folder)
+                os.close(fd)
+                renamed = []
                 try:
-                    base = _filename_base(group)
-                    pdf_target = folder / f"{base}.pdf"
-                    renames = []
-                    for number, image_id in enumerate(group["pages"], 1):
-                        image = draft["images"][image_id]
-                        src = _photo_path(draft, image)
-                        if hash_file(src) != image["sha256"]:
-                            raise ValueError(f"{src.name} wurde verändert. Bitte neu importieren.")
-                        dst = folder / f"{base}_Seite-{number:02d}{src.suffix.lower()}"
-                        if dst != src and dst.exists():
-                            raise FileExistsError(f"Fotodatei existiert bereits: {dst.name}")
-                        renames.append((src, dst))
-                    if pdf_target.exists():
-                        raise FileExistsError(f"PDF existiert bereits: {pdf_target.name}")
-                    if len({str(dst).casefold() for _, dst in renames}) != len(renames):
-                        raise ValueError("Zwei Seiten würden denselben Dateinamen erhalten.")
-                    _check_space([src for src, _ in renames], folder)
-                    fd, tmp_name = tempfile.mkstemp(prefix=".inbox-export-", suffix=".pdf", dir=folder)
-                    os.close(fd)
-                    renamed = []
-                    try:
-                        warnings = _write_pdf(draft, group, Path(tmp_name))
-                        for src, dst in renames:
-                            if src != dst:
-                                os.rename(src, dst)
-                                renamed.append((dst, src))
-                        # hard-link creation fails if a new PDF appeared in the meantime.
-                        os.link(tmp_name, pdf_target)
-                    except Exception:
-                        for dst, src in reversed(renamed):
-                            if dst.exists() and not src.exists():
-                                os.rename(dst, src)
-                        raise
-                    finally:
-                        Path(tmp_name).unlink(missing_ok=True)
-                    complete = {"id": group["id"], "pdf": pdf_target.name,
-                        "photos": [dst.name for _, dst in renames], "warnings": warnings,
-                        "at": datetime.now().isoformat(timespec="seconds")}
+                    warnings = _write_pdf(draft, group, Path(tmp_name))
+                    for src, dst in renames:
+                        if src != dst:
+                            os.rename(src, dst)
+                            renamed.append((dst, src))
+                    # Schlägt fehl, falls inzwischen eine gleichnamige PDF entstanden ist.
+                    _publish_new(Path(tmp_name), pdf_target)
+                except Exception:
+                    for dst, src in reversed(renamed):
+                        if dst.exists() and not src.exists():
+                            os.rename(dst, src)
+                    raise
+                finally:
+                    Path(tmp_name).unlink(missing_ok=True)
+                complete = {"id": group["id"], "pdf": pdf_target.name,
+                    "photos": [dst.name for _, dst in renames], "warnings": warnings,
+                    "at": datetime.now().isoformat(timespec="seconds")}
+                with self.lock:
                     draft["completed"].append(complete)
                     draft["groups"].remove(group)
                     for image_id in group["pages"]:
-                        draft["images"].pop(image_id)
-                    self._save()
-                    exported.append(complete)
-                except Exception as exc:
-                    skipped.append({"group": group.get("title") or "Unbenannte Gruppe", "reason": str(exc)})
+                        draft["images"].pop(image_id, None)
+                    _save_store(self.store)
+                exported.append(complete)
+            except Exception as exc:
+                skipped.append({"group": name, "reason": str(exc)})
+        if progress:
+            progress(len(gruppen), len(gruppen), "Abgeschlossen")
+        with self.lock:
             ungrouped = [image["name"] for image_id, image in draft["images"].items() if image_id not in _all_grouped(draft)]
             return {"exported": exported, "skipped": skipped, "ungrouped": ungrouped, "state": self.snapshot()}
 
@@ -724,6 +864,8 @@ def make_handler(app: App):
             try:
                 if parsed.path == "/api/state":
                     return self._json(200, app.snapshot())
+                if parsed.path == "/api/job":
+                    return self._json(200, app.job_status(parse_qs(parsed.query).get("id", [""])[0]))
                 if parsed.path.startswith("/api/thumb/") or parsed.path.startswith("/api/image/"):
                     image_id = parsed.path.rsplit("/", 1)[-1]
                     with app.lock:
@@ -767,7 +909,11 @@ def make_handler(app: App):
                 if path == "/api/group":
                     return self._json(200, app.group(data.get("ids", [])))
                 if path == "/api/ai":
-                    return self._json(200, app.ai_group(data.get("ids", []), data.get("consent") is True))
+                    ids = data.get("ids", [])
+                    # Auswahl und Freigabe sofort prüfen, damit Fehleingaben 400 ergeben
+                    # statt erst als Jobfehler aufzutauchen.
+                    app.ai_prepare(ids, data.get("consent") is True)
+                    return self._json(200, {"job": app.start_job("ai", lambda melden: app.ai_group(ids, True, melden))})
                 if path == "/api/update-group":
                     return self._json(200, app.update_group(data.get("id", ""), data))
                 if path == "/api/move":
@@ -779,7 +925,7 @@ def make_handler(app: App):
                 if path == "/api/reset-correction":
                     return self._json(200, app.reset_correction(data.get("id", "")))
                 if path == "/api/export":
-                    return self._json(200, app.export())
+                    return self._json(200, {"job": app.start_job("export", app.export)})
                 if path == "/api/reveal":
                     app.reveal(data.get("id", ""))
                     return self._json(200, {"ok": True})
@@ -794,6 +940,23 @@ def make_handler(app: App):
     return Handler
 
 
+def _running_instance_url() -> str | None:
+    """URL einer laufenden Instanz, oder None. Veraltete Angaben werden entfernt."""
+    info = DATA_DIR / "server.json"
+    try:
+        url = json.loads(info.read_text(encoding="utf-8"))["url"]
+        if isinstance(url, str) and url.startswith("http://127.0.0.1:"):
+            with urlopen(url, timeout=3) as response:
+                if response.status == 200:
+                    return url
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    info.unlink(missing_ok=True)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-browser", action="store_true")
@@ -804,13 +967,9 @@ def main():
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        info = DATA_DIR / "server.json"
-        if not info.is_file():
-            raise RuntimeError("Die App startet bereits. Bitte in wenigen Sekunden erneut öffnen.")
-        url = json.loads(info.read_text(encoding="utf-8"))["url"]
-        with urlopen(url, timeout=3) as response:
-            if response.status != 200:
-                raise RuntimeError("Die bereits gestartete App antwortet nicht.")
+        url = _running_instance_url()
+        if not url:
+            raise RuntimeError("Die App startet bereits oder antwortet nicht. Bitte in wenigen Sekunden erneut öffnen.")
         if args.no_browser:
             print(url, flush=True)
         else:
