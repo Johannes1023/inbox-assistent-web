@@ -2,7 +2,7 @@
 
 A local-first macOS app that turns a phone-camera pile of photographed letters into organized, searchable PDFs — with an **optional, explicitly consented** AI classification step that runs entirely through the user's own ChatGPT or Claude subscription, never a bundled API key.
 
-![Platform](https://img.shields.io/badge/platform-macOS-black) ![Python](https://img.shields.io/badge/python-3.14-blue) ![Tests](https://img.shields.io/badge/tests-193%20passing-brightgreen) ![License](https://img.shields.io/badge/privacy-local--first-green)
+![Platform](https://img.shields.io/badge/platform-macOS-black) ![Python](https://img.shields.io/badge/python-3.14-blue) ![Tests](https://img.shields.io/badge/tests-199%20passing-brightgreen) ![License](https://img.shields.io/badge/privacy-local--first-green)
 
 ---
 
@@ -87,7 +87,7 @@ This isn't a weekend script — it went through a deliberate, documented repair 
 | **Feature: dual AI provider** | Added Claude as a second backend, tested against a real, live API call with synthetic sample letters before shipping |
 | **Live verification** | Not just unit tests — a real end-to-end run against Claude with generated sample letters, checked field-by-field |
 
-**193 automated tests**, all passing, covering the HTTP layer, concurrency behavior, file-system edge cases (replaced files, missing disk space, exFAT/no-hardlink filesystems), and both AI provider code paths with mocked and live calls.
+**199 automated tests**, all passing, covering the HTTP layer, concurrency behavior, file-system edge cases (replaced files, missing disk space, exFAT/no-hardlink filesystems), and both AI provider code paths with mocked and live calls.
 
 Full change log with rationale for every fix: `git log --oneline` in this repo, or [`docs/TECHNICAL.md#development-history`](docs/TECHNICAL.md#development-history).
 
@@ -98,7 +98,7 @@ Prebuilt, ad-hoc-signed `.app` bundle: see [Releases](../../releases). Requires 
 ```bash
 git clone <this-repo>
 cd inbox-assistent-web
-python3 -m pytest tests/   # 193 tests, ~45s
+python3 -m pytest tests/   # 199 tests, ~75s
 open "Inbox-Assistent Web.app"
 ```
 

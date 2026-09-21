@@ -209,13 +209,15 @@ All three "auto-correction" steps are wrapped per-image in the AI classification
 
 ## PDF assembly & OCR
 
-Export renders each page's corrected image into its own A4-ish PDF page via PyMuPDF, then re-rasterizes that page at 2.5× and runs it through `pdfocr_tobytes()` to produce an invisible, searchable text layer — the visible image is never touched by OCR, only a transparent text overlay is added on top. If OCR fails for a given page (missing language data, corrupted image, etc.), the page is still included without a text layer and a warning is surfaced in the export result rather than the whole letter failing.
+Export renders each page's corrected image into its own A4-ish PDF page via PyMuPDF, then re-rasterizes that page at 2.5× and runs it through `pdfocr_tobytes()` to produce an invisible, searchable text layer. If OCR fails for a given page (missing language data, corrupted image, etc.), the page is still included without a text layer and a warning is surfaced in the export result rather than the whole letter failing.
+
+**Image compression.** `pdfocr_tobytes()` embeds its rasterized page losslessly (Flate/zlib on raw pixels), which for a photographed document is many times larger than necessary — measured at 1–2 MB per page on real letter photos. The text layer it produces is kept as-is, but the embedded image is immediately swapped out via `Page.replace_image()` for a compact grayscale JPEG (quality 75) built from the same corrected photo — same page geometry, same OCR text positions, unrelated pixel source. Grayscale specifically: for photographed text documents the color channel carries essentially no information the reader needs, and dropping it — on top of switching from lossless to lossy compression — is what turns a ~1 MB/page file into roughly 150–300 KB/page, a 60–70% reduction measured on real exports, without a visible drop in legibility at any zoom level a reader would actually use. The OCR text layer's accuracy is unaffected, since Tesseract runs before the swap.
 
 The final PDF is streamed directly to disk rather than held fully in memory (`pymupdf.Document.save(path)` rather than `.tobytes()`), and a disk-space check runs before the write starts, estimating usage as roughly 3× the source photo sizes plus a 100 MB safety margin, to fail cleanly before a partially-written file rather than after.
 
 ## Testing strategy
 
-**193 tests**, organized as:
+**199 tests**, organized as:
 
 - `test_naming.py`, `test_import.py`, `test_grouping.py`, `test_export.py` — the original regression net, written against the unmodified baseline *before* any fix, covering filename sanitization, path traversal defense, import dedup/verification, group/move/ungroup state transitions, and the full export-with-rollback path.
 - `test_bugfixes.py`, `test_review_runde1.py`, `test_review_runde2.py` — one test per verified defect, red before the fix, green after. Includes concurrency-specific tests (simulated slow uploads under the lock, a job that raises `BaseException`, quitting mid-export) that are hard to catch by inspection alone.
@@ -223,6 +225,7 @@ The final PDF is streamed directly to disk rather than held fully in memory (`py
 - `test_vorschau.py` — render-cache correctness (identical requests don't re-render; rotation invalidates the cache; thumbnail vs. full-size are cached separately).
 - `test_haertung.py` — the security-header and host-validation suite.
 - `test_claude_anbieter.py` — both AI provider code paths: subprocess argument construction (no tools, no MCP, no session persistence, correct schema), environment-variable filtering (an injected `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` is verifiably stripped before the subprocess is spawned), and error-message mapping (e.g. "not logged in" → an actionable `claude auth login` instruction) — all via a mocked `subprocess.run`, so the suite runs offline and deterministically in CI.
+- `test_pdf_groesse.py` — the embedded page image is JPEG (not the lossless raster `pdfocr_tobytes()` produces by default) and genuinely single-channel grayscale, output is measurably smaller than the unmodified OCR embedding on a noisy synthetic photo, OCR text still extracts correctly, and the no-OCR fallback path still produces a valid, readable PDF.
 
 Run with:
 

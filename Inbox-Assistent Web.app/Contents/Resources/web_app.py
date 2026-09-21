@@ -393,6 +393,17 @@ def _render_jpeg(image_id: str, path: Path, photo: dict, thumbnail: bool) -> byt
     return data
 
 
+# Qualitätsstufe für die im PDF sichtbaren Seiten. Graustufen: bei fotografiertem
+# Schriftgut praktisch ohne wahrnehmbaren Verlust, aber deutlich kleiner als Farbe.
+PAGE_IMAGE_QUALITY = 75
+
+
+def _page_image_bytes(image: Image.Image) -> bytes:
+    buffer = BytesIO()
+    image.convert("L").save(buffer, format="JPEG", quality=PAGE_IMAGE_QUALITY, optimize=True)
+    return buffer.getvalue()
+
+
 def _write_pdf(draft: dict, group: dict, target: Path) -> list[str]:
     """Baut die PDF seitenweise und speichert sie direkt nach target.
 
@@ -405,14 +416,13 @@ def _write_pdf(draft: dict, group: dict, target: Path) -> list[str]:
         for image_id in group["pages"]:
             photo = draft["images"][image_id]
             image = _render_image(_photo_path(draft, photo), photo)
+            page_image = _page_image_bytes(image)
             page_pdf = pymupdf.open()
             try:
                 portrait = image.height >= image.width
                 width, height = (595, 842) if portrait else (842, 595)
                 page = page_pdf.new_page(width=width, height=height)
-                image_bytes = BytesIO()
-                image.save(image_bytes, format="JPEG", quality=92, optimize=True)
-                page.insert_image(pymupdf.Rect(18, 18, width - 18, height - 18), stream=image_bytes.getvalue(), keep_proportion=True)
+                page.insert_image(pymupdf.Rect(18, 18, width - 18, height - 18), stream=page_image, keep_proportion=True)
                 # OCR is local. Its invisible text layer must not change the photo.
                 try:
                     scale = 2.5
@@ -420,6 +430,13 @@ def _write_pdf(draft: dict, group: dict, target: Path) -> list[str]:
                     pix.set_dpi(round(72 * scale), round(72 * scale))
                     ocr_pdf = pymupdf.open(stream=pix.pdfocr_tobytes(language="deu+eng"), filetype="pdf")
                     try:
+                        # pdfocr_tobytes bettet die gerenderte Seite verlustfrei (Flate) ein —
+                        # für ein fotografiertes Dokument um ein Vielfaches größer als nötig.
+                        # Der Textlayer bleibt unangetastet; nur das Bild wird ausgetauscht.
+                        ocr_page = ocr_pdf[0]
+                        images = ocr_page.get_images()
+                        if images:
+                            ocr_page.replace_image(images[0][0], stream=page_image)
                         output.insert_pdf(ocr_pdf)
                     finally:
                         ocr_pdf.close()
