@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -43,6 +44,7 @@ MAX_IMPORT_SIZE = 120 * 1024 * 1024
 MAX_JSON_SIZE = 1024 * 1024
 DATA_DIR = Path(os.environ.get("INBOX_APP_DATA_DIR", Path.home() / "Library/Application Support/Inbox-Assistent"))
 TESSERACT = shutil.which("tesseract") or "/opt/homebrew/bin/tesseract"
+MAX_COMPLETED = 200  # ältere Exporteinträge werden aus dem Entwurf entfernt, die Dateien bleiben
 
 
 def _new_draft(folder: Path) -> dict:
@@ -73,6 +75,8 @@ def _quarantine_store() -> Path:
 
 
 def _save_store(data: dict) -> None:
+    for draft in data.get("drafts", {}).values():
+        draft["completed"] = draft.get("completed", [])[-MAX_COMPLETED:]
     target = _store_file()
     fd, name = tempfile.mkstemp(prefix=".draft-", dir=target.parent)
     try:
@@ -199,8 +203,22 @@ def _auto_deskew(image: Image.Image) -> tuple[float, bool]:
     return best_angle, False
 
 
+@functools.lru_cache(maxsize=1)
+def _osd_available() -> bool:
+    """Ob Tesseract samt Orientierungsdaten (osd) installiert ist. Einmal pro Lauf geprüft."""
+    try:
+        result = subprocess.run([TESSERACT, "--list-langs"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "osd" in result.stdout.split()
+
+
 def _auto_orientation(image: Image.Image) -> tuple[int, bool]:
     """Ask local Tesseract OSD for a quarter turn; never guess on weak evidence."""
+    if not _osd_available():
+        # Ohne Tesseract ist die Erkennung schlicht nicht verfügbar. Das ist keine
+        # Unsicherheit über diese Seite; sonst trüge jede Gruppe eine Warnung.
+        return 0, False
     sample = image.copy()
     sample.thumbnail((1900, 1900))
     with tempfile.TemporaryDirectory(prefix="inbox-orient-") as folder:
@@ -848,6 +866,11 @@ def make_handler(app: App):
             # Never log tokenized URLs or document names.
             return
 
+        def _host_ok(self) -> bool:
+            """Nur Loopback-Hostnamen. Schützt gegen DNS-Rebinding von fremden Webseiten."""
+            port = self.server.server_port
+            return self.headers.get("Host", "") in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
         def _authorized(self) -> bool:
             parsed = urlparse(self.path)
             token = self.headers.get("X-App-Token") or parse_qs(parsed.query).get("token", [""])[0]
@@ -859,6 +882,7 @@ def make_handler(app: App):
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", cache)
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(content)
@@ -888,6 +912,8 @@ def make_handler(app: App):
             return json.loads(self.rfile.read(size) or b"{}")
 
         def do_GET(self):
+            if not self._host_ok():
+                return self._json(HTTPStatus.FORBIDDEN, {"error": "Ungültiger Host."})
             parsed = urlparse(self.path)
             static = {"/app.js": ("app.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8")}
@@ -921,6 +947,8 @@ def make_handler(app: App):
                 return self._json(400, {"error": str(exc)})
 
         def do_POST(self):
+            if not self._host_ok():
+                return self._json(HTTPStatus.FORBIDDEN, {"error": "Ungültiger Host."})
             if not self._authorized():
                 return self._json(HTTPStatus.FORBIDDEN, {"error": "Zugriff verweigert."})
             origin = self.headers.get("Origin")

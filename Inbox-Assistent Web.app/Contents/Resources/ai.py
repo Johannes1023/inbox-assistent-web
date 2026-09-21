@@ -10,8 +10,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import pymupdf as fitz
-
 from core import InboxItem, _load_image
 
 
@@ -77,30 +75,6 @@ def _ocr_image(path: Path) -> str:
             return ""
 
 
-def _pdf_text(path: Path) -> str:
-    fragments = []
-    with fitz.open(path) as pdf:
-        for page_index, page in enumerate(pdf):
-            if page_index >= 20:
-                break
-            text = page.get_text().strip()
-            if len(text) < 80:
-                with tempfile.TemporaryDirectory(prefix="inbox-pdfocr-") as folder:
-                    image = Path(folder) / "page.png"
-                    page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False).save(image)
-                    try:
-                        result = subprocess.run(
-                            [str(TESSERACT), str(image), "stdout", "-l", LANGUAGES],
-                            capture_output=True, text=True, timeout=60,
-                        )
-                        if result.returncode == 0:
-                            text = result.stdout.strip()
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        pass
-            fragments.append(f"--- Seite {page_index + 1} ---\n{text}")
-    return "\n".join(fragments)
-
-
 def _image_for_codex(path: Path, folder: Path, index: int) -> Path:
     if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
         return path
@@ -149,14 +123,14 @@ def classify(items: list[InboxItem], existing_senders: list[str], feedback: str 
     photos = [item for item in items if item.kind == "Foto"]
     payload = []
     for item in items:
-        content = _pdf_text(item.path) if item.kind == "PDF" else _ocr_image(item.path)
+        content = _ocr_image(item.path)
         payload.append({
             "id": item.id,
             "type": item.kind,
             "filename": item.path.name,
             "fallback_date": item.fallback_date,
             "fallback_date_source": item.date_origin,
-            "ocr_text": content[:7000] if item.kind == "PDF" else content[:3500],
+            "ocr_text": content[:3500],
         })
     instructions = (
         "Du analysierst ausdrücklich freigegebene Briefe für eine lokale Ablage-App. "
@@ -202,21 +176,3 @@ def classify(items: list[InboxItem], existing_senders: list[str], feedback: str 
     if sorted(used) != sorted(known):
         raise ValueError("ChatGPT hat Dateien ausgelassen oder mehrfach zugeordnet.")
     return suggestions
-
-
-def safe_to_auto_process(suggestion: Suggestion, id_to_item: dict[str, InboxItem], photo_order: list[str]) -> bool:
-    from core import validate_date
-    try:
-        validate_date(suggestion.date)
-    except ValueError:
-        return False
-    if suggestion.needs_review or suggestion.confidence < 0.90:
-        return False
-    if not suggestion.sender.strip() or not suggestion.title.strip() or not suggestion.evidence.strip():
-        return False
-    ids = suggestion.file_ids
-    if len(ids) > 1:
-        positions = [photo_order.index(file_id) for file_id in ids]
-        if max(positions) - min(positions) + 1 != len(positions):
-            return False
-    return True

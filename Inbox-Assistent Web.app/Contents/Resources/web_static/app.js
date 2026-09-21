@@ -296,6 +296,16 @@
     }
   });
 
+  // Vorschau nicht renderbar (Datei unlesbar, gerade umbenannt …): Hinweis statt Bruch-Symbol.
+  // Fehler-Events steigen nicht auf, daher in der Capture-Phase abfangen.
+  document.addEventListener("error", event => {
+    if (!event.target.matches?.(".photo-image")) return;
+    const hint = document.createElement("div");
+    hint.className = "empty";
+    hint.textContent = "Vorschau nicht verfügbar";
+    event.target.replaceWith(hint);
+  }, true);
+
   document.addEventListener("dragstart", event => {
     const card = event.target.closest(".photo-card");
     if (!card) return;
