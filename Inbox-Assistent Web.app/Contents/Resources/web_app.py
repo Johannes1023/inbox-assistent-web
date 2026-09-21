@@ -33,7 +33,7 @@ import pymupdf
 from PIL import Image, ImageFilter
 
 from ai import classify
-from core import (PLACEHOLDER, InboxItem, _load_image, fallback_date, hash_file,
+from core import (InboxItem, _load_image, fallback_date, hash_file, is_blank_component,
                   sanitize_component, validate_date)
 
 
@@ -42,6 +42,9 @@ STATIC = HERE / "web_static"
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic"}
 MAX_IMPORT_SIZE = 120 * 1024 * 1024
 MAX_JSON_SIZE = 1024 * 1024
+# Bis zu dieser Größe wird ein abgelehnter Upload gelesen und verworfen, damit der
+# Browser die Fehlermeldung statt eines Verbindungsabbruchs bekommt.
+MAX_DRAIN = 1024 * 1024 * 1024
 DATA_DIR = Path(os.environ.get("INBOX_APP_DATA_DIR", Path.home() / "Library/Application Support/Inbox-Assistent"))
 TESSERACT = shutil.which("tesseract") or "/opt/homebrew/bin/tesseract"
 MAX_COMPLETED = 200  # ältere Exporteinträge werden aus dem Entwurf entfernt, die Dateien bleiben
@@ -112,23 +115,26 @@ def _photo_path(draft: dict, image: dict) -> Path:
     return path
 
 
-def _known_senders(folder: Path) -> list[str]:
-    """Absender aus bereits exportierten PDFs ({datum}_{absender}_{titel}.pdf).
+def _known_senders(folder: Path, completed: list[dict]) -> list[str]:
+    """Bereits verwendete Absender, damit die Klassifikation dieselbe Schreibweise wählt.
 
-    Gibt der Klassifikation die vorhandenen Schreibweisen an die Hand, damit
-    dieselbe Organisation nicht jedes Mal anders benannt wird.
+    Quellen: die eigene Exportliste (exakt) und Dateinamen {datum}_{absender}_{titel}.pdf
+    im Ordner. Enthält Absender oder Titel selbst einen Unterstrich, ist die Zerlegung
+    mehrdeutig; solche Dateien werden übersprungen statt einen falschen Namen zu lernen.
     """
     senders: dict[str, str] = {}
+    for entry in completed:
+        name = str(entry.get("sender", "")).strip()
+        if name:
+            senders.setdefault(name.casefold(), name)
     try:
         entries = list(folder.glob("*.pdf"))
     except OSError:
-        return []
+        entries = []
     for entry in entries:
         parts = entry.stem.split("_")
-        if len(parts) >= 3 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[0]):
-            name = parts[1].strip()
-            if name and name != PLACEHOLDER:
-                senders.setdefault(name.casefold(), name)
+        if len(parts) == 3 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[0]) and parts[1].strip():
+            senders.setdefault(parts[1].strip().casefold(), parts[1].strip())
     return sorted(senders.values())
 
 
@@ -140,9 +146,9 @@ def _filename_base(group: dict) -> str:
     date = validate_date(group.get("date", ""))
     sender = sanitize_component(group.get("sender", "").strip(), 70)
     title = sanitize_component(group.get("title", "").strip(), 100)
-    # Geprüft wird das Ergebnis der Bereinigung, nicht die Rohgabe: "..." oder "///"
-    # werden sonst still zum Platzhalter und landen unbemerkt im Dateinamen.
-    if PLACEHOLDER in (sender, title):
+    # Geprüft wird, was die Bereinigung übrig lässt: "..." oder "///" würden sonst
+    # still zum Platzhalter. Ein echter Name "Unbekannt" bleibt dagegen erlaubt.
+    if is_blank_component(group.get("sender", "")) or is_blank_component(group.get("title", "")):
         raise ValueError("Datum, Organisation und Titel müssen ausgefüllt sein.")
     return f"{date}_{sender}_{title}"
 
@@ -443,17 +449,31 @@ class App:
         # Zustandsänderungen; die eigentliche Arbeit läuft ohne ihn, damit die
         # Oberfläche währenddessen bedienbar bleibt.
         self.job: dict | None = None
+        self.closing = False
         if initial_folder:
             self.select_folder(initial_folder)
 
-    def _ensure_idle(self) -> None:
-        if self.job and self.job["status"] == "running":
-            raise ValueError("Es läuft bereits ein Vorgang. Bitte abwarten.")
+    def ensure_idle(self) -> None:
+        with self.lock:
+            if self.closing:
+                raise ValueError("Die App wird gerade beendet.")
+            if self.job and self.job["status"] == "running":
+                raise ValueError("Es läuft bereits ein Vorgang. Bitte abwarten.")
+
+    def prepare_quit(self) -> None:
+        """Beenden nur im Leerlauf. Danach startet kein neuer Vorgang mehr.
+
+        Der Job-Thread ist ein Daemon; ein Shutdown mitten im Export würde ihn
+        zwischen PDF-Anlage und Umbenennen abbrechen.
+        """
+        with self.lock:
+            self.ensure_idle()
+            self.closing = True
 
     def start_job(self, kind: str, work) -> str:
         """Startet einen langen Vorgang im Hintergrund und liefert seine Nummer."""
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             job_id = uuid.uuid4().hex
             self.job = {"id": job_id, "kind": kind, "status": "running",
                         "progress": {"done": 0, "total": 0, "label": ""},
@@ -489,7 +509,7 @@ class App:
         if not folder.is_dir():
             raise ValueError("Ordner nicht gefunden.")
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             key = str(folder)
             self.store["drafts"].setdefault(key, _new_draft(folder))
             self.folder = folder
@@ -532,7 +552,7 @@ class App:
         if size <= 0 or size > MAX_IMPORT_SIZE:
             raise ValueError("Das Foto ist leer oder zu groß (maximal 120 MB).")
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             draft = self.draft()
             path = self.folder / filename
             if not path.is_file() or path.stat().st_size != size:
@@ -581,7 +601,7 @@ class App:
 
     def group(self, ids: list[str]) -> dict:
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             draft = self.draft()
             ids = list(dict.fromkeys(ids))
             if not ids or any(i not in draft["images"] for i in ids):
@@ -599,7 +619,7 @@ class App:
             raise ValueError("Für die ChatGPT-Analyse ist eine ausdrückliche Freigabe nötig.")
         with self.lock:
             if check_idle:
-                self._ensure_idle()
+                self.ensure_idle()
             draft = self.draft()
             ids = list(dict.fromkeys(ids))
             if not ids or any(i not in draft["images"] for i in ids) or any(i in _all_grouped(draft) for i in ids):
@@ -612,13 +632,14 @@ class App:
 
         OCR, der Codex-Aufruf und die Begradigung laufen bewusst ohne den Lock:
         sie dauern Minuten, und die Oberfläche muss in dieser Zeit antworten.
-        Änderungen sind währenddessen über _ensure_idle gesperrt.
+        Änderungen sind währenddessen über ensure_idle gesperrt.
         """
         # Läuft selbst als Job; die Leerlaufprüfung würde sonst den eigenen Job abweisen.
         items = self.ai_prepare(ids, consent, check_idle=False)
         with self.lock:
             draft = self.draft()
             folder = self.folder
+            erledigt = list(draft["completed"])
             erwartet = {item.id: draft["images"][item.id]["sha256"] for item in items}
             rueckfall = {item.id: draft["images"][item.id]["fallback_date"] for item in items}
 
@@ -630,7 +651,7 @@ class App:
         if progress:
             progress(0, schritte, "ChatGPT wertet die Seiten aus")
         # The model sees exactly these files. It is never given folder write access.
-        suggestions = classify(items, _known_senders(folder))
+        suggestions = classify(items, _known_senders(folder, erledigt))
         prepared = []
         for suggestion in suggestions:
             hinweise = []
@@ -641,10 +662,6 @@ class App:
                 # zeigt es leer an, und der Nutzer sieht erst beim Export eine Formatmeldung.
                 datum = rueckfall[suggestion.file_ids[0]]
                 hinweise.append(f"Datum „{suggestion.date}“ war unlesbar; Aufnahmedatum eingesetzt.")
-            if sanitize_component(suggestion.sender.strip(), 70) == PLACEHOLDER:
-                hinweise.append("Absender fehlt.")
-            if sanitize_component(suggestion.title.strip(), 100) == PLACEHOLDER:
-                hinweise.append("Titel fehlt.")
             pruefen = bool(suggestion.needs_review) or bool(hinweise)
             prepared.append({"id": uuid.uuid4().hex, "pages": suggestion.file_ids,
                 "date": datum, "sender": suggestion.sender, "title": suggestion.title,
@@ -686,7 +703,7 @@ class App:
 
     def update_group(self, group_id: str, fields: dict) -> dict:
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             group = next((g for g in self.draft()["groups"] if g["id"] == group_id), None)
             if not group:
                 raise ValueError("Gruppe nicht gefunden.")
@@ -704,7 +721,7 @@ class App:
 
     def move(self, image_id: str, target_id: str | None, index: int | None) -> dict:
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             draft = self.draft()
             if image_id not in draft["images"]:
                 raise ValueError("Seite nicht gefunden.")
@@ -730,7 +747,7 @@ class App:
 
     def ungroup(self, group_id: str) -> dict:
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             draft = self.draft()
             previous = len(draft["groups"])
             draft["groups"] = [g for g in draft["groups"] if g["id"] != group_id]
@@ -740,7 +757,7 @@ class App:
 
     def rotate(self, image_id: str, degrees: int) -> dict:
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             draft = self.draft()
             if image_id not in draft["images"] or degrees not in (-90, 90, 180):
                 raise ValueError("Ungültige Drehung.")
@@ -750,7 +767,7 @@ class App:
 
     def reset_correction(self, image_id: str) -> dict:
         with self.lock:
-            self._ensure_idle()
+            self.ensure_idle()
             image = self.draft()["images"].get(image_id)
             if not image:
                 raise ValueError("Seite nicht gefunden.")
@@ -801,22 +818,31 @@ class App:
                 fd, tmp_name = tempfile.mkstemp(prefix=".inbox-export-", suffix=".pdf", dir=folder)
                 os.close(fd)
                 renamed = []
+                published = False
                 try:
                     warnings = _write_pdf(draft, group, Path(tmp_name))
+                    # Erst die PDF anlegen, dann umbenennen. Bricht der Prozess dazwischen
+                    # ab, tragen die Fotos noch ihre Namen und der Entwurf stimmt weiter;
+                    # der nächste Export meldet dann nur "PDF existiert bereits".
+                    # Schlägt fehl, falls inzwischen eine gleichnamige PDF entstanden ist.
+                    _publish_new(Path(tmp_name), pdf_target)
+                    published = True
                     for src, dst in renames:
                         if src != dst:
                             os.rename(src, dst)
                             renamed.append((dst, src))
-                    # Schlägt fehl, falls inzwischen eine gleichnamige PDF entstanden ist.
-                    _publish_new(Path(tmp_name), pdf_target)
                 except Exception:
                     for dst, src in reversed(renamed):
                         if dst.exists() and not src.exists():
                             os.rename(dst, src)
+                    if published:
+                        # Nur die eben selbst exklusiv angelegte Datei, nie eine fremde.
+                        pdf_target.unlink(missing_ok=True)
                     raise
                 finally:
                     Path(tmp_name).unlink(missing_ok=True)
                 complete = {"id": group["id"], "pdf": pdf_target.name,
+                    "sender": sanitize_component(group.get("sender", "").strip(), 70),
                     "photos": [dst.name for _, dst in renames], "warnings": warnings,
                     "at": datetime.now().isoformat(timespec="seconds")}
                 with self.lock:
@@ -861,6 +887,8 @@ class _CountingReader:
 def make_handler(app: App):
     class Handler(BaseHTTPRequestHandler):
         server_version = "InboxAssistent/2"
+        # Ein Client, der weniger sendet als angekündigt, darf keinen Thread ewig binden.
+        timeout = 60
 
         def log_message(self, format, *args):
             # Never log tokenized URLs or document names.
@@ -876,11 +904,14 @@ def make_handler(app: App):
             token = self.headers.get("X-App-Token") or parse_qs(parsed.query).get("token", [""])[0]
             return secrets.compare_digest(token, app.token)
 
-        def _reply(self, status: int, content: bytes, content_type: str, cache: str = "no-store") -> None:
+        def _reply(self, status: int, content: bytes, content_type: str, cache: str = "no-store",
+                   etag: str = "") -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", cache)
+            if etag:
+                self.send_header("ETag", etag)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
@@ -936,10 +967,19 @@ def make_handler(app: App):
                             raise ValueError("Foto nicht gefunden.")
                         photo = dict(photo)
                         path = _photo_path(draft, photo)
-                    # Rendern ohne Lock: mehrere Vorschauen entstehen parallel.
-                    data = _render_jpeg(image_id, path, photo, parsed.path.startswith("/api/thumb/"))
+                    thumbnail = parsed.path.startswith("/api/thumb/")
                     # Die URL trägt die Bildversion; ändert sich das Bild, ändert sich die URL.
-                    return self._reply(200, data, "image/jpeg", cache="private, max-age=31536000, immutable")
+                    cache = "private, max-age=31536000, immutable"
+                    etag = f'"{_image_version(photo)}-{"t" if thumbnail else "i"}"'
+                    if self.headers.get("If-None-Match") == etag:
+                        self.send_response(304)
+                        self.send_header("ETag", etag)
+                        self.send_header("Cache-Control", cache)
+                        self.end_headers()
+                        return
+                    # Rendern ohne Lock: mehrere Vorschauen entstehen parallel.
+                    data = _render_jpeg(image_id, path, photo, thumbnail)
+                    return self._reply(200, data, "image/jpeg", cache=cache, etag=etag)
                 if parsed.path == "/":
                     return self._reply(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
                 return self._json(404, {"error": "Nicht gefunden."})
@@ -963,10 +1003,11 @@ def make_handler(app: App):
                     try:
                         return self._json(200, app.import_file(name, size, reader))
                     except Exception:
-                        self._drain(min(size, MAX_IMPORT_SIZE) - reader.consumed)
+                        self._drain(min(size, MAX_DRAIN) - reader.consumed)
                         raise
                 data = self._input()
                 if path == "/api/select-folder":
+                    app.ensure_idle()  # vor dem Dialog, nicht erst nach der Auswahl
                     folder = _choose_folder()
                     return self._json(200, app.select_folder(folder) if folder else {"cancelled": True})
                 if path == "/api/group":
@@ -993,6 +1034,7 @@ def make_handler(app: App):
                     app.reveal(data.get("id", ""))
                     return self._json(200, {"ok": True})
                 if path == "/api/quit":
+                    app.prepare_quit()
                     self._json(200, {"ok": True})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
@@ -1032,7 +1074,7 @@ def main():
     except BlockingIOError:
         url = _running_instance_url()
         if not url:
-            raise RuntimeError("Die App startet bereits oder antwortet nicht. Bitte in wenigen Sekunden erneut öffnen.")
+            raise SystemExit("Die App startet bereits oder antwortet nicht. Bitte in wenigen Sekunden erneut öffnen.")
         if args.no_browser:
             print(url, flush=True)
         else:

@@ -8,6 +8,7 @@
   let busy = false;
   let noticeTimer = null;
   let noticeShown = false;
+  const MAX_IMPORT_SIZE = 120 * 1024 * 1024;
 
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[ch]);
   const imageById = (id) => state.images.find(image => image.id === id);
@@ -178,6 +179,8 @@
     busy = true;
     notify(`${files.length} ${files.length === 1 ? "Foto wird" : "Fotos werden"} geprüft …`, "info", true);
     for (const file of files) {
+      // Vorab prüfen: einen riesigen Upload erst zu senden, um ihn dann abzulehnen, kostet nur Zeit.
+      if (file.size > MAX_IMPORT_SIZE) { errors.push(`${file.name}: Das Foto ist zu groß (maximal 120 MB).`); continue; }
       try {
         const response = await fetch("/api/import", {method:"POST",headers:{"X-App-Token":token,"X-Filename":encodeURIComponent(file.name),"Content-Type":"application/octet-stream"},body:file});
         const result = await response.json();

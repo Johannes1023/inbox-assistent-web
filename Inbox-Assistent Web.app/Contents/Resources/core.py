@@ -59,11 +59,23 @@ def fallback_date(path: Path) -> tuple[str, str]:
     return datetime.fromtimestamp(created).date().isoformat(), "Dateierstellungsdatum"
 
 
-def sanitize_component(value: str, max_length: int = 90) -> str:
+def _clean_component(value: str) -> str:
     value = unicodedata.normalize("NFC", value)
     value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", " ", value)
-    value = re.sub(r"\s+", " ", value).strip(" .")
-    return (value or PLACEHOLDER)[:max_length].rstrip(" .")
+    return re.sub(r"\s+", " ", value).strip(" .")
+
+
+def sanitize_component(value: str, max_length: int = 90) -> str:
+    return (_clean_component(value) or PLACEHOLDER)[:max_length].rstrip(" .")
+
+
+def is_blank_component(value: str) -> bool:
+    """True, wenn nach der Bereinigung nichts übrig bleibt.
+
+    Nicht dasselbe wie "Ergebnis ist PLACEHOLDER": ein Absender, der wirklich
+    "Unbekannt" heißt, ist gültig.
+    """
+    return not _clean_component(value)
 
 
 def validate_date(value: str) -> str:
