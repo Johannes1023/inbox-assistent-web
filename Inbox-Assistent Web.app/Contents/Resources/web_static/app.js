@@ -105,7 +105,26 @@
     </article>`;
   }
 
+  // Das aktive Eingabefeld einer Gruppe merken. render() ersetzt das HTML komplett;
+  // ohne das springt der Fokus nach Tab auf <body> und die nächste Eingabe geht verloren.
+  function captureFocus() {
+    const active = document.activeElement;
+    if (!active?.matches?.(".group-fields input")) return null;
+    return {group: active.closest(".group-card").dataset.group, name: active.name, value: active.value,
+            start: active.selectionStart, end: active.selectionEnd};
+  }
+
+  function restoreFocus(saved) {
+    if (!saved) return;
+    const input = document.querySelector(`.group-card[data-group="${CSS.escape(saved.group)}"] .group-fields input[name="${saved.name}"]`);
+    if (!input) return;
+    input.value = saved.value;  // noch nicht gespeicherte Eingabe behalten
+    input.focus();
+    try { input.setSelectionRange(saved.start, saved.end); } catch { /* type=date kennt keine Auswahl */ }
+  }
+
   function render() {
+    const focus = captureFocus();
     const grouped = new Set(state.groups.flatMap(group => group.pages));
     const open = state.images.filter(image => !grouped.has(image.id));
     for (const id of [...selected]) if (!open.some(image => image.id === id)) selected.delete(id);
@@ -140,6 +159,8 @@
         <div class="group-bottom"><small>${group.source === "ai" ? `Hinweise: ${esc(group.evidence || "Vorschlag prüfen")}` : "Seiten per Drag-and-drop oder Pfeiltasten sortieren."}</small>${review ? `<button class="button primary confirm-group" type="button">Vorschlag bestätigen</button>` : ""}</div>
       </article>`;
     }).join("") : `<div class="empty">Noch keine Gruppen erstellt. Wähle oben zusammengehörige Fotoseiten aus.</div>`;
+
+    restoreFocus(focus);
 
     $("#completed").hidden = !state.completed.length;
     $("#completed-list").innerHTML = state.completed.map(item => `<div class="completed-item"><span>✓ ${esc(item.pdf)}</span><button class="text-button reveal" data-id="${esc(item.id)}" type="button">Im Finder zeigen</button></div>`).join("");
