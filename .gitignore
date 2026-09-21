@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 *.zip
 dist/
+.DS_Store
+**/.DS_Store
