@@ -166,7 +166,10 @@ def _readiness(group: dict, draft: dict) -> tuple[bool, str]:
         image = draft["images"].get(image_id)
         if not image:
             return False, "Eine Seite fehlt im Entwurf."
-        path = _photo_path(draft, image)
+        try:
+            path = _photo_path(draft, image)
+        except ValueError as exc:
+            return False, str(exc)
         if not path.is_file():
             return False, f"Datei fehlt: {image['name']}"
         if path.stat().st_size != image["size"]:
@@ -490,7 +493,7 @@ class App:
                 with self.lock:
                     if self.job and self.job["id"] == job_id:
                         self.job.update(status="done", result=ergebnis)
-            except Exception as exc:
+            except BaseException as exc:  # auch SystemExit: ein hängender "running"-Job sperrte die App
                 with self.lock:
                     if self.job and self.job["id"] == job_id:
                         self.job.update(status="error", error=str(exc) or exc.__class__.__name__)
@@ -522,23 +525,30 @@ class App:
         return self.store["drafts"][str(self.folder)]
 
     def snapshot(self) -> dict:
-        if not self.folder:
-            return {"folder": None, "images": [], "groups": [], "completed": [],
-                    "recent": list(self.store["drafts"])[-5:], "notice": self.notice}
-        draft = self.draft()
-        images = []
-        for image in draft["images"].values():
-            current = dict(image)
-            current["missing"] = not _photo_path(draft, image).is_file()
-            current["version"] = _image_version(image)
-            images.append(current)
-        groups = []
-        for group in draft["groups"]:
-            ready, reason = _readiness(group, draft)
-            groups.append({**group, "ready": ready, "blocked_reason": reason, "filename": f"{_filename_base(group)}.pdf" if ready else ""})
-        return {"folder": str(self.folder), "images": images, "groups": groups,
-                "completed": draft["completed"], "recent": list(self.store["drafts"])[-5:],
-                "notice": self.notice}
+        # Unter dem Lock: /api/state läuft parallel zu Import und Export, die den
+        # Entwurf ändern. Ohne ihn kann die Iteration mitten in einer Änderung brechen.
+        with self.lock:
+            if not self.folder:
+                return {"folder": None, "images": [], "groups": [], "completed": [],
+                        "recent": list(self.store["drafts"])[-5:], "notice": self.notice}
+            draft = self.draft()
+            images = []
+            for image in draft["images"].values():
+                current = dict(image)
+                try:
+                    current["missing"] = not _photo_path(draft, image).is_file()
+                except ValueError:
+                    current["missing"] = True
+                current["version"] = _image_version(image)
+                images.append(current)
+            groups = []
+            for group in draft["groups"]:
+                ready, reason = _readiness(group, draft)
+                groups.append({**group, "pages": list(group["pages"]), "ready": ready, "blocked_reason": reason,
+                               "filename": f"{_filename_base(group)}.pdf" if ready else ""})
+            return {"folder": str(self.folder), "images": images, "groups": groups,
+                    "completed": list(draft["completed"]), "recent": list(self.store["drafts"])[-5:],
+                    "notice": self.notice}
 
     def _save(self) -> dict:
         _save_store(self.store)
@@ -553,33 +563,42 @@ class App:
             raise ValueError("Das Foto ist leer oder zu groß (maximal 120 MB).")
         with self.lock:
             self.ensure_idle()
+            self.draft()
+            folder = self.folder
+        # Hochladen, Hashen und Prüfen ohne Lock: bei 120-MB-Fotos dauert das Sekunden,
+        # und in dieser Zeit müssen Vorschauen und andere Aktionen weiterlaufen.
+        path = folder / filename
+        if not path.is_file() or path.stat().st_size != size:
+            raise ValueError(f"{filename} liegt nicht im gewählten Quellordner oder hat sich geändert.")
+        sent = hashlib.sha256()
+        left = size
+        while left:
+            chunk = stream.read(min(left, 1024 * 1024))
+            if not chunk:
+                raise ValueError("Der Foto-Upload wurde unterbrochen.")
+            sent.update(chunk)
+            left -= len(chunk)
+        digest = sent.hexdigest()
+        if digest != hash_file(path):
+            raise ValueError(f"{filename} stimmt nicht mit der Datei im Quellordner überein.")
+        try:
+            with Image.open(path) as image:
+                image.verify()
+        except Exception:
+            # macOS can open HEIC through sips even without a Pillow plugin.
+            if path.suffix.lower() != ".heic":
+                raise ValueError(f"{filename} kann nicht als Foto gelesen werden.")
+            _load_image(path)
+        date, origin = fallback_date(path)
+
+        with self.lock:
+            self.ensure_idle()
+            if self.folder != folder:
+                raise ValueError("Der Ordner wurde während des Imports gewechselt. Bitte erneut importieren.")
             draft = self.draft()
-            path = self.folder / filename
-            if not path.is_file() or path.stat().st_size != size:
-                raise ValueError(f"{filename} liegt nicht im gewählten Quellordner oder hat sich geändert.")
-            sent = hashlib.sha256()
-            left = size
-            while left:
-                chunk = stream.read(min(left, 1024 * 1024))
-                if not chunk:
-                    raise ValueError("Der Foto-Upload wurde unterbrochen.")
-                sent.update(chunk)
-                left -= len(chunk)
-            digest = sent.hexdigest()
-            if digest != hash_file(path):
-                raise ValueError(f"{filename} stimmt nicht mit der Datei im Quellordner überein.")
             existing = next((image for image in draft["images"].values() if image["name"] == filename), None)
             if existing is not None and existing["sha256"] == digest:
                 return self.snapshot()
-            try:
-                with Image.open(path) as image:
-                    image.verify()
-            except Exception:
-                # macOS can open HEIC through sips even without a Pillow plugin.
-                if path.suffix.lower() != ".heic":
-                    raise ValueError(f"{filename} kann nicht als Foto gelesen werden.")
-                _load_image(path)
-            date, origin = fallback_date(path)
             if existing is not None:
                 # Die Datei im Ordner wurde durch eine andere mit gleichem Namen ersetzt.
                 # Ein zweiter Eintrag würde die Gruppe dauerhaft mit "Datei wurde
@@ -735,7 +754,6 @@ class App:
                         group["confirmed"] = False
                         group["needs_review"] = True
                         group["reason"] = "Seitenzuordnung wurde geändert. Bitte erneut prüfen."
-            draft["groups"] = [g for g in draft["groups"] if g["pages"]]
             if target:
                 index = len(target["pages"]) if index is None else max(0, min(int(index), len(target["pages"])))
                 target["pages"].insert(index, image_id)
@@ -743,6 +761,9 @@ class App:
                     target["confirmed"] = False
                     target["needs_review"] = True
                     target["reason"] = "Seitenreihenfolge wurde geändert. Bitte erneut prüfen."
+            # Leere Gruppen erst nach dem Einfügen entfernen: sonst verschwand eine
+            # Gruppe, deren einzige Seite auf die eigene Gruppe gezogen wurde.
+            draft["groups"] = [g for g in draft["groups"] if g["pages"]]
             return self._save()
 
     def ungroup(self, group_id: str) -> dict:
@@ -831,13 +852,20 @@ class App:
                         if src != dst:
                             os.rename(src, dst)
                             renamed.append((dst, src))
-                except Exception:
+                except Exception as exc:
+                    nicht_zurueck = []
                     for dst, src in reversed(renamed):
-                        if dst.exists() and not src.exists():
-                            os.rename(dst, src)
+                        try:
+                            if dst.exists() and not src.exists():
+                                os.rename(dst, src)
+                        except OSError:
+                            nicht_zurueck.append(f"{dst.name} → {src.name}")
                     if published:
                         # Nur die eben selbst exklusiv angelegte Datei, nie eine fremde.
                         pdf_target.unlink(missing_ok=True)
+                    if nicht_zurueck:
+                        raise OSError(f"{exc} Diese Fotos konnten nicht zurückbenannt werden: "
+                                      f"{', '.join(nicht_zurueck)}") from exc
                     raise
                 finally:
                     Path(tmp_name).unlink(missing_ok=True)
@@ -850,7 +878,13 @@ class App:
                     draft["groups"].remove(group)
                     for image_id in group["pages"]:
                         draft["images"].pop(image_id, None)
-                    _save_store(self.store)
+                    try:
+                        _save_store(self.store)
+                    except OSError as exc:
+                        # Die Dateien sind fertig; nur der Entwurf ist nicht auf Platte.
+                        # Das ist kein fehlgeschlagener Export und darf nicht so gemeldet werden.
+                        complete["warnings"].append(f"Entwurf konnte nicht gespeichert werden ({exc}). "
+                                                    "PDF und Fotos sind korrekt exportiert.")
                 exported.append(complete)
             except Exception as exc:
                 skipped.append({"group": name, "reason": str(exc)})
@@ -940,7 +974,10 @@ def make_handler(app: App):
             size = int(self.headers.get("Content-Length", "0"))
             if size < 0 or size > MAX_JSON_SIZE:
                 raise ValueError("Ungültige Anfragegröße.")
-            return json.loads(self.rfile.read(size) or b"{}")
+            data = json.loads(self.rfile.read(size) or b"{}")
+            if not isinstance(data, dict):
+                raise ValueError("Ungültige Anfrage.")
+            return data
 
         def do_GET(self):
             if not self._host_ok():
@@ -992,7 +1029,8 @@ def make_handler(app: App):
             if not self._authorized():
                 return self._json(HTTPStatus.FORBIDDEN, {"error": "Zugriff verweigert."})
             origin = self.headers.get("Origin")
-            if origin and origin != f"http://127.0.0.1:{self.server.server_port}":
+            port = self.server.server_port
+            if origin and origin not in {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}:
                 return self._json(HTTPStatus.FORBIDDEN, {"error": "Ungültige Herkunft."})
             path = urlparse(self.path).path
             try:
@@ -1035,8 +1073,12 @@ def make_handler(app: App):
                     return self._json(200, {"ok": True})
                 if path == "/api/quit":
                     app.prepare_quit()
-                    self._json(200, {"ok": True})
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    try:
+                        self._json(200, {"ok": True})
+                    finally:
+                        # Auch wenn der Browser die Antwort nicht mehr abnimmt: nach
+                        # prepare_quit nimmt die App nichts mehr an, also wirklich beenden.
+                        threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
                 return self._json(404, {"error": "Nicht gefunden."})
             except Exception as exc:

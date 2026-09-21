@@ -240,6 +240,13 @@
   });
   $("#browse-files").addEventListener("click", () => $("#file-input").click());
   $("#file-input").addEventListener("change", event => { importFiles([...event.target.files]); event.target.value = ""; });
+  // Dateien, die neben der Ablagefläche losgelassen werden, öffnete der Browser
+  // bisher selbst – der App-Tab war dann weg. Überall sonst den Standard unterbinden.
+  for (const type of ["dragover", "drop"]) {
+    window.addEventListener(type, event => {
+      if (event.dataTransfer?.types?.includes("Files") && !event.target.closest?.("#drop-zone")) event.preventDefault();
+    });
+  }
   const zone = $("#drop-zone");
   zone.addEventListener("dragover", event => {event.preventDefault(); zone.classList.add("drag-over");});
   zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
