@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".webp", ".bmp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
 STATE_FILE = ".inbox-assistent-state.json"
+PLACEHOLDER = "Unbekannt"
 PHOTO_ARCHIVE = "Archivierte Fotos"
 
 
@@ -95,7 +96,7 @@ def sanitize_component(value: str, max_length: int = 90) -> str:
     value = unicodedata.normalize("NFC", value)
     value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", " ", value)
     value = re.sub(r"\s+", " ", value).strip(" .")
-    return (value or "Unbekannt")[:max_length].rstrip(" .")
+    return (value or PLACEHOLDER)[:max_length].rstrip(" .")
 
 
 def validate_date(value: str) -> str:

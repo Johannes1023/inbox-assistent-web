@@ -31,7 +31,8 @@ import pymupdf
 from PIL import Image, ImageFilter
 
 from ai import classify
-from core import InboxItem, _load_image, fallback_date, hash_file, sanitize_component, validate_date
+from core import (PLACEHOLDER, InboxItem, _load_image, fallback_date, hash_file,
+                  sanitize_component, validate_date)
 
 
 HERE = Path(__file__).resolve().parent
@@ -98,6 +99,26 @@ def _photo_path(draft: dict, image: dict) -> Path:
     return path
 
 
+def _known_senders(folder: Path) -> list[str]:
+    """Absender aus bereits exportierten PDFs ({datum}_{absender}_{titel}.pdf).
+
+    Gibt der Klassifikation die vorhandenen Schreibweisen an die Hand, damit
+    dieselbe Organisation nicht jedes Mal anders benannt wird.
+    """
+    senders: dict[str, str] = {}
+    try:
+        entries = list(folder.glob("*.pdf"))
+    except OSError:
+        return []
+    for entry in entries:
+        parts = entry.stem.split("_")
+        if len(parts) >= 3 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[0]):
+            name = parts[1].strip()
+            if name and name != PLACEHOLDER:
+                senders.setdefault(name.casefold(), name)
+    return sorted(senders.values())
+
+
 def _all_grouped(draft: dict) -> set[str]:
     return {page for group in draft["groups"] for page in group["pages"]}
 
@@ -106,7 +127,9 @@ def _filename_base(group: dict) -> str:
     date = validate_date(group.get("date", ""))
     sender = sanitize_component(group.get("sender", "").strip(), 70)
     title = sanitize_component(group.get("title", "").strip(), 100)
-    if not group.get("sender", "").strip() or not group.get("title", "").strip():
+    # Geprüft wird das Ergebnis der Bereinigung, nicht die Rohgabe: "..." oder "///"
+    # werden sonst still zum Platzhalter und landen unbemerkt im Dateinamen.
+    if PLACEHOLDER in (sender, title):
         raise ValueError("Datum, Organisation und Titel müssen ausgefüllt sein.")
     return f"{date}_{sender}_{title}"
 
@@ -244,6 +267,17 @@ def _apply_quad(image: Image.Image, quad: list[float]) -> Image.Image:
                            (*tl, *bl, *br, *tr), resample=Image.Resampling.BICUBIC)
 
 
+def _check_space(paths: list[Path], folder: Path) -> None:
+    """PDF, OCR-Zwischenbild und umbenannte Fotos brauchen Platz im selben Ordner."""
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return
+    required = sum(path.stat().st_size for path in paths if path.is_file()) * 3 + 100 * 1024 * 1024
+    if free < required:
+        raise OSError("Zu wenig freier Speicherplatz für eine sichere Verarbeitung.")
+
+
 def _render_image(path: Path, image_state: dict, thumbnail: bool = False) -> Image.Image:
     image = _load_image(path)
     auto_turn = int(image_state.get("auto_rotation", 0)) % 360
@@ -262,7 +296,12 @@ def _render_image(path: Path, image_state: dict, thumbnail: bool = False) -> Ima
     return image
 
 
-def _pdf_bytes(draft: dict, group: dict) -> tuple[bytes, list[str]]:
+def _write_pdf(draft: dict, group: dict, target: Path) -> list[str]:
+    """Baut die PDF seitenweise und speichert sie direkt nach target.
+
+    Früher wurde das gesamte Dokument als bytes zurückgegeben; bei vielen Seiten
+    lagen PDF und OCR-Pixmaps gleichzeitig im Speicher.
+    """
     output = pymupdf.open()
     warnings = []
     try:
@@ -293,7 +332,8 @@ def _pdf_bytes(draft: dict, group: dict) -> tuple[bytes, list[str]]:
             finally:
                 page_pdf.close()
         output.set_metadata({"creator": "Inbox-Assistent"})
-        return output.tobytes(garbage=3, deflate=True), warnings
+        output.save(str(target), garbage=3, deflate=True)
+        return warnings
     finally:
         output.close()
 
@@ -366,9 +406,9 @@ class App:
             digest = sent.hexdigest()
             if digest != hash_file(path):
                 raise ValueError(f"{filename} stimmt nicht mit der Datei im Quellordner überein.")
-            for image in draft["images"].values():
-                if image["name"] == filename and image["sha256"] == digest:
-                    return self.snapshot()
+            existing = next((image for image in draft["images"].values() if image["name"] == filename), None)
+            if existing is not None and existing["sha256"] == digest:
+                return self.snapshot()
             try:
                 with Image.open(path) as image:
                     image.verify()
@@ -378,6 +418,19 @@ class App:
                     raise ValueError(f"{filename} kann nicht als Foto gelesen werden.")
                 _load_image(path)
             date, origin = fallback_date(path)
+            if existing is not None:
+                # Die Datei im Ordner wurde durch eine andere mit gleichem Namen ersetzt.
+                # Ein zweiter Eintrag würde die Gruppe dauerhaft mit "Datei wurde
+                # geändert" blockieren, ohne Weg zurück. Also Eintrag aktualisieren.
+                existing.update({"sha256": digest, "size": size, "fallback_date": date,
+                                 "date_origin": origin, "rotation": 0, "auto_rotation": 0,
+                                 "auto_quad": None, "auto_angle": 0, "auto_review": False})
+                for group in draft["groups"]:
+                    if existing["id"] in group["pages"] and group["source"] == "ai":
+                        group["confirmed"] = False
+                        group["needs_review"] = True
+                        group["reason"] = f"{filename} wurde ersetzt. Bitte erneut prüfen."
+                return self._save()
             image_id = uuid.uuid4().hex
             draft["images"][image_id] = {"id": image_id, "name": filename, "sha256": digest,
                 "size": size, "fallback_date": date, "date_origin": origin,
@@ -411,26 +464,44 @@ class App:
                 if not item.path.is_file() or hash_file(item.path) != draft["images"][item.id]["sha256"]:
                     raise ValueError(f"{item.path.name} wurde verändert. Bitte neu importieren.")
             # The model sees exactly these files. It is never given folder write access.
-            suggestions = classify(items, [])
+            suggestions = classify(items, _known_senders(self.folder))
             prepared = []
             for suggestion in suggestions:
+                hinweise = []
+                try:
+                    datum = validate_date(suggestion.date)
+                except ValueError:
+                    # Ein unlesbares Datum darf nicht stumm in den Entwurf: <input type="date">
+                    # zeigt es leer an, und der Nutzer sieht erst beim Export eine Formatmeldung.
+                    datum = draft["images"][suggestion.file_ids[0]]["fallback_date"]
+                    hinweise.append(f"Datum „{suggestion.date}“ war unlesbar; Aufnahmedatum eingesetzt.")
+                if sanitize_component(suggestion.sender.strip(), 70) == PLACEHOLDER:
+                    hinweise.append("Absender fehlt.")
+                if sanitize_component(suggestion.title.strip(), 100) == PLACEHOLDER:
+                    hinweise.append("Titel fehlt.")
+                pruefen = bool(suggestion.needs_review) or bool(hinweise)
                 prepared.append({"id": uuid.uuid4().hex, "pages": suggestion.file_ids,
-                    "date": suggestion.date, "sender": suggestion.sender, "title": suggestion.title,
+                    "date": datum, "sender": suggestion.sender, "title": suggestion.title,
                     "source": "ai", "confirmed": False,
-                    "needs_review": bool(suggestion.needs_review),
-                    "reason": suggestion.reason or ("KI-Vorschlag bitte bestätigen." if suggestion.needs_review else ""),
+                    "needs_review": pruefen,
+                    "reason": " ".join(hinweise) or suggestion.reason or ("KI-Vorschlag bitte bestätigen." if pruefen else ""),
                     "evidence": suggestion.evidence})
             corrections = {}
             for item in items:
-                photo = _load_image(item.path)
-                turn, unsure_turn = _auto_orientation(photo)
-                if turn:
-                    photo = photo.rotate(turn, expand=True)
-                quad = _page_quad(photo)
-                if quad:
-                    photo = _apply_quad(photo, quad)
-                angle, unsure_angle = _auto_deskew(photo)
-                corrections[item.id] = (turn, quad, angle, unsure_turn or unsure_angle)
+                try:
+                    photo = _load_image(item.path)
+                    turn, unsure_turn = _auto_orientation(photo)
+                    if turn:
+                        photo = photo.rotate(turn, expand=True)
+                    quad = _page_quad(photo)
+                    if quad:
+                        photo = _apply_quad(photo, quad)
+                    angle, unsure_angle = _auto_deskew(photo)
+                    corrections[item.id] = (turn, quad, angle, unsure_turn or unsure_angle)
+                except Exception:
+                    # Eine misslungene Begradigung darf nicht das ganze Analyseergebnis
+                    # kosten. Die Seite bleibt unkorrigiert und wird zur Prüfung markiert.
+                    corrections[item.id] = (0, None, 0.0, True)
             for image_id, (turn, quad, angle, uncertain) in corrections.items():
                 draft["images"][image_id]["auto_rotation"] = turn
                 draft["images"][image_id]["auto_quad"] = quad
@@ -537,14 +608,12 @@ class App:
                         raise FileExistsError(f"PDF existiert bereits: {pdf_target.name}")
                     if len({str(dst).casefold() for _, dst in renames}) != len(renames):
                         raise ValueError("Zwei Seiten würden denselben Dateinamen erhalten.")
-                    pdf_data, warnings = _pdf_bytes(draft, group)
+                    _check_space([src for src, _ in renames], folder)
                     fd, tmp_name = tempfile.mkstemp(prefix=".inbox-export-", suffix=".pdf", dir=folder)
+                    os.close(fd)
                     renamed = []
                     try:
-                        with os.fdopen(fd, "wb") as handle:
-                            handle.write(pdf_data)
-                            handle.flush()
-                            os.fsync(handle.fileno())
+                        warnings = _write_pdf(draft, group, Path(tmp_name))
                         for src, dst in renames:
                             if src != dst:
                                 os.rename(src, dst)
@@ -583,6 +652,19 @@ class App:
             subprocess.Popen(["/usr/bin/open", "-R", str(path)])
 
 
+class _CountingReader:
+    """Zählt mit, wie viel vom Anfragerumpf bereits gelesen wurde."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.consumed = 0
+
+    def read(self, count: int) -> bytes:
+        chunk = self._stream.read(count)
+        self.consumed += len(chunk)
+        return chunk
+
+
 def make_handler(app: App):
     class Handler(BaseHTTPRequestHandler):
         server_version = "InboxAssistent/2"
@@ -608,6 +690,21 @@ def make_handler(app: App):
 
         def _json(self, status: int, data: dict) -> None:
             self._reply(status, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+        def _drain(self, remaining: int) -> None:
+            """Nicht gelesenen Anfragerumpf verwerfen.
+
+            Ohne das schließt der Server die Verbindung mitten im Upload; der Browser
+            meldet dann einen Netzwerkfehler statt der eigentlichen Ursache.
+            """
+            while remaining > 0:
+                try:
+                    chunk = self.rfile.read(min(remaining, 1024 * 1024))
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                remaining -= len(chunk)
 
         def _input(self) -> dict:
             size = int(self.headers.get("Content-Length", "0"))
@@ -657,7 +754,12 @@ def make_handler(app: App):
                 if path == "/api/import":
                     size = int(self.headers.get("Content-Length", "0"))
                     name = unquote(self.headers.get("X-Filename", ""))
-                    return self._json(200, app.import_file(name, size, self.rfile))
+                    reader = _CountingReader(self.rfile)
+                    try:
+                        return self._json(200, app.import_file(name, size, reader))
+                    except Exception:
+                        self._drain(min(size, MAX_IMPORT_SIZE) - reader.consumed)
+                        raise
                 data = self._input()
                 if path == "/api/select-folder":
                     folder = _choose_folder()
