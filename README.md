@@ -2,8 +2,6 @@
 
 A local-first macOS app that turns a phone-camera pile of photographed letters into organized, searchable PDFs — with an **optional, explicitly consented** AI classification step that runs entirely through the user's own ChatGPT or Claude subscription, never a bundled API key.
 
-> **Status:** personal project, built as a hands-on demonstration of AI-assisted software engineering practice — planning, TDD, security review, and iterative hardening — documented end-to-end in the [commit history](../../commits/main) and [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
-
 ![Platform](https://img.shields.io/badge/platform-macOS-black) ![Python](https://img.shields.io/badge/python-3.14-blue) ![Tests](https://img.shields.io/badge/tests-193%20passing-brightgreen) ![License](https://img.shields.io/badge/privacy-local--first-green)
 
 ---
@@ -106,6 +104,6 @@ open "Inbox-Assistent Web.app"
 
 Full local dev setup: [`docs/TECHNICAL.md#running-locally`](docs/TECHNICAL.md#running-locally).
 
-## License / usage note
+## License
 
-MIT — free to use, copy, modify. This is a portfolio project first (the app processes real personal mail for its author, and this repo is published to demonstrate engineering practice), but the license places no restriction on reuse. No warranty — read the code before trusting it with your own documents.
+MIT — free to use, copy, modify, distribute. No warranty; read the code before trusting it with your own documents.
